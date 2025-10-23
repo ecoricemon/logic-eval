@@ -1,0 +1,15 @@
+[package]
+name = "logic-eval-util"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "util"
+readme = "README.md" 
+repository = "https://github.com/ecoricemon/logic-eval"
+license = "Apache-2.0 OR MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+smallvec = { version = "1.15.1" }
