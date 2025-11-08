@@ -162,7 +162,7 @@ impl ExprArray {
         self.buf.pop()
     }
 
-    const fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.buf.len()
     }
 
@@ -283,12 +283,17 @@ impl<'a, T> ExprView<'a, T> {
         }
     }
 
+    /// The given function `f` is applied on the top terms of the expression, but not applied on
+    /// inner terms of the top terms.
+    ///
+    /// Note that a term is a recursive type like expression.
     pub(crate) fn with_term<F: FnMut(TermView<'a, T>)>(&self, f: &mut F) {
         match self.as_kind() {
             ExprKind::Term(term) => f(term),
             ExprKind::Not(inner) => inner.with_term(f),
-            ExprKind::And(args) => args.into_iter().for_each(|arg| arg.with_term(f)),
-            ExprKind::Or(args) => args.into_iter().for_each(|arg| arg.with_term(f)),
+            ExprKind::And(args) | ExprKind::Or(args) => {
+                args.into_iter().for_each(|arg| arg.with_term(f))
+            }
         }
     }
 }

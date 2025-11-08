@@ -954,6 +954,34 @@ pub(crate) mod format {
         ) -> Self {
             Self { view, int2name }
         }
+
+        pub fn is(&self, term: &Term<Name>) -> bool {
+            let functor = self.view.functor();
+            let Some(functor) = self.int2name.get(functor) else {
+                return false;
+            };
+
+            if functor != &term.functor {
+                return false;
+            }
+
+            self.args().zip(&term.args).all(|(l, r)| l.is(r))
+        }
+
+        pub fn contains(&self, term: &Term<Name>) -> bool {
+            if self.is(term) {
+                return true;
+            }
+
+            self.args().any(|arg| arg.contains(term))
+        }
+
+        fn args(&self) -> impl Iterator<Item = Self> {
+            self.view.args().map(|arg| Self {
+                view: arg,
+                int2name: self.int2name,
+            })
+        }
     }
 
     impl fmt::Display for NamedTermView<'_> {
@@ -1072,7 +1100,7 @@ pub(crate) mod format {
         }
     }
 
-    pub(crate) struct NamedExprView<'a> {
+    pub struct NamedExprView<'a> {
         view: ExprView<'a, Int>,
         int2name: &'a IndexMap<Int, Name>,
     }
@@ -1083,6 +1111,28 @@ pub(crate) mod format {
             int2name: &'a IndexMap<Int, Name>,
         ) -> Self {
             Self { view, int2name }
+        }
+
+        pub fn contains_term(&self, term: &Term<Name>) -> bool {
+            match self.view.as_kind() {
+                ExprKind::Term(view) => NamedTermView {
+                    view,
+                    int2name: self.int2name,
+                }
+                .contains(term),
+                ExprKind::Not(view) => NamedExprView {
+                    view,
+                    int2name: self.int2name,
+                }
+                .contains_term(term),
+                ExprKind::And(args) | ExprKind::Or(args) => args.into_iter().any(|view| {
+                    NamedExprView {
+                        view,
+                        int2name: self.int2name,
+                    }
+                    .contains_term(term)
+                }),
+            }
         }
     }
 

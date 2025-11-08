@@ -29,11 +29,11 @@ impl<T> UniqueContainer<T> {
         }
     }
 
-    pub const fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.values.len()
     }
 
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
@@ -41,11 +41,11 @@ impl<T> UniqueContainer<T> {
         self.values.get(index)
     }
 
-    pub fn iter(&self) -> PairIter<T> {
+    pub fn iter(&self) -> PairIter<'_, T> {
         self.values.iter()
     }
 
-    pub fn values(&self) -> ValueIter<T> {
+    pub fn values(&self) -> ValueIter<'_, T> {
         self.values.values()
     }
 
@@ -202,15 +202,15 @@ impl<T> Values<T> {
         Self(Vec::new())
     }
 
-    const fn len(&self) -> usize {
+    fn len(&self) -> usize {
         self.0.len()
     }
 
-    fn iter(&self) -> PairIter<T> {
+    fn iter(&self) -> PairIter<'_, T> {
         PairIter::new(self)
     }
 
-    fn values(&self) -> ValueIter<T> {
+    fn values(&self) -> ValueIter<'_, T> {
         ValueIter::new(self)
     }
 

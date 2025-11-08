@@ -149,11 +149,6 @@ pub(crate) struct CommaToken {
 }
 impl_parse_for_string!(",", CommaToken);
 
-pub(crate) struct SemiToken {
-    pub(crate) _loc: Location,
-}
-impl_parse_for_string!(";", SemiToken);
-
 pub(crate) struct DotToken {
     pub(crate) _loc: Location,
 }

@@ -65,15 +65,14 @@ impl Database {
         }
     }
 
-    pub fn clauses(&self) -> impl iter::FusedIterator<Item = ClauseRef<'_>> {
-        self.clauses
-            .values()
-            .flat_map(|group| group.iter().cloned())
-            .map(|id| ClauseRef {
-                id,
-                stor: &self.stor,
-                int2name: &self.nimap.int2name,
-            })
+    pub fn clauses(&self) -> ClauseIter<'_> {
+        ClauseIter {
+            clauses: &self.clauses,
+            stor: &self.stor,
+            int2name: &self.nimap.int2name,
+            i: 0,
+            j: 0,
+        }
     }
 
     pub fn insert_dataset(&mut self, dataset: ClauseDataset<Name>) {
@@ -333,22 +332,70 @@ struct DatabaseState {
     nimap_state: NameIntMapState,
 }
 
+#[derive(Clone)]
+pub struct ClauseIter<'a> {
+    clauses: &'a IndexMap<Predicate<Int>, Vec<ClauseId>>,
+    stor: &'a TermStorage<Int>,
+    int2name: &'a IndexMap<Int, Name>,
+    i: usize,
+    j: usize,
+}
+
+impl<'a> Iterator for ClauseIter<'a> {
+    type Item = ClauseRef<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let id = loop {
+            let (_, group) = self.clauses.get_index(self.i)?;
+
+            if let Some(id) = group.get(self.j) {
+                self.j += 1;
+                break *id;
+            }
+
+            self.i += 1;
+            self.j = 0;
+        };
+
+        Some(ClauseRef {
+            id,
+            stor: self.stor,
+            int2name: self.int2name,
+        })
+    }
+}
+
+impl iter::FusedIterator for ClauseIter<'_> {}
+
 pub struct ClauseRef<'a> {
     id: ClauseId,
     stor: &'a TermStorage<Int>,
     int2name: &'a IndexMap<Int, Name>,
 }
 
+impl<'a> ClauseRef<'a> {
+    pub fn head(&self) -> NamedTermView<'a> {
+        let head = self.stor.get_term(self.id.head);
+        NamedTermView::new(head, self.int2name)
+    }
+
+    pub fn body(&self) -> Option<NamedExprView<'a>> {
+        self.id.body.map(|id| {
+            let body = self.stor.get_expr(id);
+            NamedExprView::new(body, self.int2name)
+        })
+    }
+}
+
 impl fmt::Display for ClauseRef<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let head = self.stor.get_term(self.id.head);
-        fmt::Display::fmt(&NamedTermView::new(head, self.int2name), f)?;
+        fmt::Display::fmt(&self.head(), f)?;
 
-        if let Some(body) = self.id.body {
-            let body = self.stor.get_expr(body);
+        if let Some(body) = self.body() {
             f.write_str(" :- ")?;
-            fmt::Display::fmt(&NamedExprView::new(body, self.int2name), f)?
+            fmt::Display::fmt(&body, f)?
         }
+
         f.write_char('.')
     }
 }

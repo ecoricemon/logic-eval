@@ -1,17 +1,18 @@
 [package]
-name = "logic-eval"
-version = "0.1.0"
+name = "logic-eval-home"
+version = "0.0.0"
 edition = "2024"
 rust-version = "1.85"
-description = "A simple logic evaluator"
-readme = "README.md" 
 repository = "https://github.com/ecoricemon/logic-eval"
 license = "Apache-2.0 OR MIT"
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
-[dependencies]
-logic-eval-util = { version = "0.1.0", path = "crates/logic-eval-util" }
+[workspace]
+members = ["crates/*"]
+
+[workspace.dependencies]
 indexmap = { version = "2.12.0" }
 ahash = { version = "0.8.12" }
+smallvec = { version = "1.15.1" }
