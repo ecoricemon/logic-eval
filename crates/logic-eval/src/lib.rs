@@ -13,7 +13,7 @@ pub use parse::{
     text::Name,
 };
 pub use prove::{
-    db::{ClauseRef, ClauseIter, Database},
+    db::{ClauseIter, ClauseRef, Database},
     prover::ProveCx,
 };
 

@@ -118,14 +118,25 @@ where
         let hash = Self::hash(&value);
 
         if let Some(exist_idx) = self._find(hash, &value) {
-            self.values
-                .replace(index, Value::Indirect(Cell::new(exist_idx)));
-            self.values.replace(exist_idx, Value::Data(value));
+            replace(self, index, Value::Indirect(Cell::new(exist_idx)));
+            replace(self, exist_idx, Value::Data(value));
         } else {
-            Self::append_mapping(&mut self.map, hash, index);
-            let old = self.values.replace(index, Value::Data(value));
+            replace(self, index, Value::Data(value));
+        }
+
+        // === Internal helper functions ===
+
+        fn replace<T: Hash + Eq>(this: &mut UniqueContainer<T>, index: usize, value: Value<T>) {
+            if let Value::Data(new) = &value {
+                let hash = UniqueContainer::<T>::hash(new);
+                UniqueContainer::<T>::append_mapping(&mut this.map, hash, index);
+            }
+
+            let old = this.values.replace(index, value);
+
             if let Value::Data(old) = old {
-                Self::remove_mapping(&mut self.map, Self::hash(&old), index);
+                let hash = UniqueContainer::<T>::hash(&old);
+                UniqueContainer::<T>::remove_mapping(&mut this.map, hash, index);
             }
         }
     }
@@ -145,15 +156,12 @@ where
     where
         Q: PartialEq<T> + ?Sized,
     {
-        self.map
-            .get(&hash)
-            .map(|indices| {
-                indices
-                    .iter()
-                    .find(|index| value == &self.values[**index])
-                    .cloned()
-            })
-            .flatten()
+        self.map.get(&hash).and_then(|indices| {
+            indices
+                .iter()
+                .find(|index| value == &self.values[**index])
+                .cloned()
+        })
     }
 
     fn hash<Q>(value: &Q) -> u64
