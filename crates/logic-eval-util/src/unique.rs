@@ -6,13 +6,10 @@ use std::{
     iter, mem, ops,
 };
 
-/// - Each value is unique in this container. if multiple indices have to refer
-///   to the same value, then only one index points to the real value and the
-///   others point to indirect values, which are just jump indices to the real
-///   value.
+/// - Each value is unique in this container. if multiple indices have to refer to the same value,
+///   then only one index points to the real value and the others point to indirect values, which
+///   are just jump indices to the real value.
 /// - You can get a value via its index.
-/// - This container doesn't support remove methods except clear method, so that
-///   index cannot be broken until you call the clear method.
 #[derive(Debug, Clone)]
 pub struct UniqueContainer<T> {
     values: Values<T>,
@@ -49,6 +46,7 @@ impl<T> UniqueContainer<T> {
         self.values.values()
     }
 
+    /// All indices will be invalidated.
     pub fn clear(&mut self) {
         self.values.clear();
         self.map.clear();
@@ -57,12 +55,23 @@ impl<T> UniqueContainer<T> {
 
 impl<T> UniqueContainer<T>
 where
-    T: Hash + Eq + std::fmt::Debug, // TODO: remove debug
+    T: Hash + Eq,
 {
+    /// Shortens the container to the given length.
+    ///
+    /// All indices beyond the length will be invalidated.
+    pub fn truncate(&mut self, len: usize) {
+        for index in len..self.values.len() {
+            let hash = Self::hash(&self.values[index]);
+            Self::remove_mapping(&mut self.map, hash, index);
+        }
+        self.values.truncate(len);
+    }
+
     /// Inserts the given value in the container.
     ///
-    /// If the same value was found by [`PartialEq`], then the old value is
-    /// replaced with the given new value.
+    /// If the same value was found by [`PartialEq`], then the old value is replaced with the given
+    /// new value.
     pub fn insert(&mut self, value: T) -> usize {
         let hash = Self::hash(&value);
         if let Some(index) = self._find(hash, &value) {
@@ -99,13 +108,12 @@ where
 
     /// Replaces a value at the given index with the given value.
     ///
-    /// Note that some other indices that point to the old value will point to
-    /// the given new value after replacement.
+    /// Note that some other indices that point to the old value will point to the given new value
+    /// after replacement.
     ///
-    /// You may keep in mind that you should get an index using [`Self::find`].
-    /// Because what you want would be to replace [`Value::Data`] which can
-    /// be obtained by the find function. Otherwise, you may pick up an index
-    /// to a [`Value::Indirect`] which ends up a wrong result.
+    /// You may keep in mind that you should get an index using [`Self::find`]. Because what you
+    /// want would be to replace [`Value::Data`] which can be obtained by the find function.
+    /// Otherwise, you may pick up an index to a [`Value::Indirect`] which ends up a wrong result.
     fn replace_at(&mut self, index: usize, value: T) {
         let hash = Self::hash(&value);
 
@@ -132,20 +140,20 @@ where
 
     /// Returns an index to the given value in the container.
     ///
-    /// The returned index points to a real data, which is [`Value::Data`] in
-    /// other words.
+    /// The returned index points to a real data, which is [`Value::Data`] in other words.
     fn _find<Q>(&self, hash: u64, value: &Q) -> Option<usize>
     where
         Q: PartialEq<T> + ?Sized,
     {
-        if let Some(idxs) = self.map.get(&hash) {
-            for idx in idxs.iter() {
-                if value == &self.values[*idx] {
-                    return Some(*idx);
-                }
-            }
-        }
-        None
+        self.map
+            .get(&hash)
+            .map(|indices| {
+                indices
+                    .iter()
+                    .find(|index| value == &self.values[**index])
+                    .cloned()
+            })
+            .flatten()
     }
 
     fn hash<Q>(value: &Q) -> u64
@@ -239,6 +247,10 @@ impl<T> Values<T> {
 
     fn clear(&mut self) {
         self.0.clear();
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.0.truncate(len);
     }
 }
 
