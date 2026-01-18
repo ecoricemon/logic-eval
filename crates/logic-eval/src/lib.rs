@@ -5,7 +5,6 @@ mod prove;
 
 // === Re-exports ===
 
-pub use logic_eval_util::str::Str;
 pub use parse::{
     inner::VAR_PREFIX,
     inner::{Parse, parse_str},
@@ -17,25 +16,13 @@ pub use prove::{
     prover::ProveCx,
 };
 
+pub mod intern {
+    pub use any_intern::*;
+}
+
 // === Hash map and set used within this crate ===
 
-#[cfg(not(test))]
-pub(crate) type Map<K, V> = std::collections::HashMap<K, V, ahash::RandomState>;
-
-#[cfg(test)]
-pub(crate) type Map<K, V> = std::collections::HashMap<K, V, FixedState>;
-
-#[cfg(test)]
-#[derive(Default, Clone, Copy)]
-struct FixedState;
-
-#[cfg(test)]
-impl std::hash::BuildHasher for FixedState {
-    type Hasher = std::hash::DefaultHasher;
-    fn build_hasher(&self) -> Self::Hasher {
-        std::hash::DefaultHasher::new()
-    }
-}
+pub(crate) type Map<K, V> = std::collections::HashMap<K, V, fxhash::FxBuildHasher>;
 
 #[derive(Default, Clone, Copy)]
 struct PassThroughHasher {
@@ -56,7 +43,9 @@ impl std::hash::Hasher for PassThroughHasher {
     }
 }
 
-pub(crate) type NoHashState = std::hash::BuildHasherDefault<PassThroughHasher>;
+pub(crate) type PassThroughState = std::hash::BuildHasherDefault<PassThroughHasher>;
+
+// === Result/Error used within this crate ===
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 pub(crate) type Error = Box<dyn std::error::Error + Send + Sync>;

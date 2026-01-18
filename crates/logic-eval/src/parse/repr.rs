@@ -101,7 +101,7 @@ impl<T: Clone> Term<T> {
     }
 }
 
-impl Term<Name> {
+impl Term<Name<'_>> {
     pub fn is_variable(&self) -> bool {
         let is_variable = self.functor.is_variable();
 
@@ -139,7 +139,7 @@ impl<T: fmt::Display> fmt::Display for Term<T> {
     }
 }
 
-impl fmt::Debug for Term<Name> {
+impl fmt::Debug for Term<Name<'_>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.args.is_empty() {
             self.functor.fmt(f)
@@ -230,7 +230,7 @@ impl<T: fmt::Display> fmt::Display for Expr<T> {
     }
 }
 
-impl fmt::Debug for Expr<Name> {
+impl fmt::Debug for Expr<Name<'_>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Term(term) => fmt::Debug::fmt(term, f),

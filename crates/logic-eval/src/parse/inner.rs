@@ -1,12 +1,27 @@
 use crate::{Error, Result};
+use any_intern::{DroplessInterner, Interned};
 
-pub fn parse_str<T: Parse>(text: &str) -> Result<T> {
+pub fn parse_str<'cx, T: Parse<'cx>>(gcx: &GlobalCx<'cx>, text: &str) -> Result<T> {
     let mut buf = ParseBuffer::new(text);
-    T::parse(&mut buf)
+    T::parse(&mut buf, gcx)
 }
 
-pub trait Parse: Sized {
-    fn parse(buf: &mut ParseBuffer<'_>) -> Result<Self>;
+pub trait Parse<'cx>: Sized + 'cx {
+    fn parse(buf: &mut ParseBuffer<'_>, gcx: &GlobalCx<'cx>) -> Result<Self>;
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct GlobalCx<'a> {
+    // By using concrete type here, this crate is strongly coupled with the interner crate. A new
+    // trait would good to abstract that, but it makes more complexity over the entire crate.
+    // Consider bring the approach when concrete type is not suitable anymore.
+    pub interner: &'a DroplessInterner,
+}
+
+impl<'a> GlobalCx<'a> {
+    pub fn intern_str(&self, s: &str) -> Interned<'a, str> {
+        self.interner.intern(s)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -31,15 +46,15 @@ impl<'a> ParseBuffer<'a> {
         &self.text[self.start..self.end]
     }
 
-    pub(crate) fn parse<T: Parse>(&mut self) -> Result<T> {
-        T::parse(self)
+    pub(crate) fn parse<'cx, T: Parse<'cx>>(&mut self, gcx: &GlobalCx<'cx>) -> Result<T> {
+        T::parse(self, gcx)
     }
 
-    pub(crate) fn peek_parse<T: Parse>(&self) -> Option<(T, Self)> {
+    pub(crate) fn peek_parse<'cx, T: Parse<'cx>>(&self, gcx: &GlobalCx<'cx>) -> Option<(T, Self)> {
         let mut peek = *self;
         // FIXME: No need to create error messages, which may cause performance
         // issue.
-        T::parse(&mut peek).ok().map(|t| (t, peek))
+        T::parse(&mut peek, gcx).ok().map(|t| (t, peek))
     }
 }
 
@@ -51,8 +66,8 @@ impl Ident {
     }
 }
 
-impl Parse for Ident {
-    fn parse(buf: &mut ParseBuffer<'_>) -> Result<Self> {
+impl Parse<'_> for Ident {
+    fn parse(buf: &mut ParseBuffer<'_>, _: &GlobalCx<'_>) -> Result<Self> {
         fn is_allowed_first(c: char) -> bool {
             c.is_alphabetic() || !(c.is_whitespace() || RESERVED.contains(&c))
         }
@@ -95,8 +110,8 @@ impl Parse for Ident {
 
 macro_rules! impl_parse_for_string {
     ($str:literal, $ty:ident) => {
-        impl Parse for $ty {
-            fn parse(buf: &mut ParseBuffer<'_>) -> Result<Self> {
+        impl<'cx> Parse<'cx> for $ty {
+            fn parse(buf: &mut ParseBuffer<'_>, _: &GlobalCx<'cx>) -> Result<Self> {
                 let s = buf.cur_text();
 
                 let Some(l) = s.find(|c: char| !c.is_whitespace()) else {

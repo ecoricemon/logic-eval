@@ -1,18 +1,12 @@
-use super::str::Str;
 use crate::Map;
+use any_intern::Interned;
 
 #[derive(Debug)]
-pub struct SymbolTable<T> {
-    map: Map<Str, Vec<Symbol<T>>>,
+pub struct SymbolTable<'int, T> {
+    map: Map<Interned<'int, str>, Vec<Symbol<T>>>,
 }
 
-impl<T> SymbolTable<T> {
-    pub fn new() -> Self {
-        Self {
-            map: Map::default(),
-        }
-    }
-
+impl<'int, T> SymbolTable<'int, T> {
     pub fn clear(&mut self) {
         self.map.clear();
     }
@@ -21,7 +15,7 @@ impl<T> SymbolTable<T> {
         self.map.is_empty()
     }
 
-    pub fn push(&mut self, name: Str, symbol: T) {
+    pub fn push(&mut self, name: Interned<'int, str>, symbol: T) {
         if let Some(v) = self.map.get_mut(&name) {
             v.push(Symbol::Data(symbol));
         } else {
@@ -29,8 +23,8 @@ impl<T> SymbolTable<T> {
         }
     }
 
-    pub fn pop(&mut self, name: &str) -> Option<T> {
-        match self.map.get_mut(name)?.pop()? {
+    pub fn pop(&mut self, name: Interned<'int, str>) -> Option<T> {
+        match self.map.get_mut(&name)?.pop()? {
             Symbol::Data(v) => Some(v),
             Symbol::Transparent | Symbol::Opaque => None,
         }
@@ -55,17 +49,17 @@ impl<T> SymbolTable<T> {
         self.map.retain(|_, v| !v.is_empty());
     }
 
-    pub fn get(&self, name: &str) -> Option<&T> {
-        self.map.get(name)?.iter().rev().find_map(|x| match x {
+    pub fn get(&self, name: Interned<'int, str>) -> Option<&T> {
+        self.map.get(&name)?.iter().rev().find_map(|x| match x {
             Symbol::Data(v) => Some(Some(v)),
             Symbol::Transparent => None,  // Continue the iteration.
             Symbol::Opaque => Some(None), // Stop the iteration.
         })?
     }
 
-    pub fn get_mut(&mut self, name: &str) -> Option<&mut T> {
+    pub fn get_mut(&mut self, name: Interned<'int, str>) -> Option<&mut T> {
         self.map
-            .get_mut(name)?
+            .get_mut(&name)?
             .iter_mut()
             .rev()
             .find_map(|x| match x {
@@ -76,9 +70,11 @@ impl<T> SymbolTable<T> {
     }
 }
 
-impl<T> Default for SymbolTable<T> {
+impl<T> Default for SymbolTable<'_, T> {
     fn default() -> Self {
-        Self::new()
+        Self {
+            map: Map::default(),
+        }
     }
 }
 

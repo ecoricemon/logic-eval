@@ -5,22 +5,23 @@ A simple logic evaluator.
 ## Example
 
 ```rust
-use logic_eval::{Database, parse_str};
+use logic_eval::{Database, parse_str, intern::DroplessInterner};
 
 // Creates a DB.
-let mut db = Database::new();
+let interner = DroplessInterner::default();
+let mut db = Database::new(&interner);
 let dataset = "
     child(a, b).
     child(b, c).
     descend($X, $Y) :- child($X, $Y).
     descend($X, $Z) :- child($X, $Y), descend($Y, $Z).
 ";
-db.insert_dataset(parse_str(dataset).unwrap());
+db.insert_dataset(parse_str(db.gcx(), dataset).unwrap());
 db.commit();
 
 // Queries the DB.
 let query = "descend($X, $Y).";
-let mut cx = db.query(parse_str(query).unwrap());
+let mut cx = db.query(parse_str(db.gcx(), query).unwrap());
 
 let mut answer = Vec::new();
 while let Some(eval) = cx.prove_next() {

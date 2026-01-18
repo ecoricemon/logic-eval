@@ -2,7 +2,7 @@
 name = "logic-eval-home"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 repository = "https://github.com/ecoricemon/logic-eval"
 license = "Apache-2.0 OR MIT"
 
@@ -13,6 +13,13 @@ crate-type = ["rlib"]
 members = ["crates/*"]
 
 [workspace.dependencies]
+any-intern = { path = "crates/any-intern" }
+logic-eval-util = { path = "crates/logic-eval-util" }
 indexmap = { version = "2.12.0" }
 ahash = { version = "0.8.12" }
 smallvec = { version = "1.15.1" }
+bumpalo = { version = "3.19.1" }
+fxhash = { version = "0.2.1" }
+hashbrown = { version = "0.16.1" }
+parking_lot = { version = "0.12.5" }
+paste = { version = "1.0.15" }

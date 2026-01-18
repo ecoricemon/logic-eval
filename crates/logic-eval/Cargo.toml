@@ -1,17 +1,19 @@
 [package]
 name = "logic-eval"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 description = "A simple logic evaluator"
 readme = "README.md" 
 repository = "https://github.com/ecoricemon/logic-eval"
 license = "Apache-2.0 OR MIT"
+keywords = ["logic"]
 
 [lib]
 crate-type = ["rlib"]
 
 [dependencies]
-logic-eval-util = { version = "0.1.0", path = "../logic-eval-util" }
+any-intern = { workspace = true }
+logic-eval-util = { workspace = true }
 indexmap = { workspace = true }
-ahash = { workspace = true }
+fxhash = { workspace = true }

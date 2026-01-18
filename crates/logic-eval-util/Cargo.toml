@@ -1,8 +1,8 @@
 [package]
 name = "logic-eval-util"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 description = "utility for logic-eval"
 readme = "README.md" 
 repository = "https://github.com/ecoricemon/logic-eval"
@@ -12,4 +12,6 @@ license = "Apache-2.0 OR MIT"
 crate-type = ["rlib"]
 
 [dependencies]
+any-intern = { workspace = true }
 smallvec = { workspace = true }
+fxhash = { workspace = true }

@@ -1,6 +1,6 @@
 use super::{
     prover::{
-        Int, NameIntMap, NameIntMapState, ProveCx, Prover,
+        IdxMap, Int, NameIntMap, NameIntMapState, ProveCx, Prover,
         format::{NamedExprView, NamedTermView},
     },
     repr::{ClauseId, TermStorage, TermStorageLen},
@@ -8,12 +8,13 @@ use super::{
 use crate::{
     Map,
     parse::{
-        VAR_PREFIX,
+        GlobalCx, VAR_PREFIX,
         repr::{Clause, ClauseDataset, Expr, Predicate, Term},
         text::Name,
     },
     prove::repr::{ExprKind, ExprView, TermView, TermViewIter},
 };
+use any_intern::DroplessInterner;
 use indexmap::{IndexMap, IndexSet};
 use std::{
     fmt::{self, Write},
@@ -21,7 +22,7 @@ use std::{
 };
 
 #[derive(Debug)]
-pub struct Database {
+pub struct Database<'cx> {
     /// Clause id dataset.
     clauses: IndexMap<Predicate<Int>, Vec<ClauseId>>,
 
@@ -38,34 +39,42 @@ pub struct Database {
     ///
     /// [`Int`] is internally used for fast comparison, but we need to get it
     /// back to [`Name`] for the clients.
-    nimap: NameIntMap,
+    nimap: NameIntMap<'cx>,
 
     /// States of DB's fields.
     ///
     /// This is used when we discard some changes on the DB.
     revert_point: Option<DatabaseState>,
+
+    gcx: GlobalCx<'cx>,
 }
 
-impl Database {
-    pub fn new() -> Self {
+impl<'cx> Database<'cx> {
+    pub fn new(interner: &'cx DroplessInterner) -> Self {
+        let gcx = GlobalCx { interner };
         Self {
             clauses: IndexMap::default(),
             clause_texts: IndexSet::default(),
             stor: TermStorage::new(),
             prover: Prover::new(),
-            nimap: NameIntMap::new(),
+            nimap: NameIntMap::new(gcx),
             revert_point: None,
+            gcx,
         }
     }
 
-    pub fn terms(&self) -> NamedTermViewIter<'_> {
+    pub fn gcx(&self) -> &GlobalCx<'cx> {
+        &self.gcx
+    }
+
+    pub fn terms(&self) -> NamedTermViewIter<'_, 'cx> {
         NamedTermViewIter {
             term_iter: self.stor.terms.terms(),
             int2name: &self.nimap.int2name,
         }
     }
 
-    pub fn clauses(&self) -> ClauseIter<'_> {
+    pub fn clauses(&self) -> ClauseIter<'_, 'cx> {
         ClauseIter {
             clauses: &self.clauses,
             stor: &self.stor,
@@ -75,13 +84,13 @@ impl Database {
         }
     }
 
-    pub fn insert_dataset(&mut self, dataset: ClauseDataset<Name>) {
+    pub fn insert_dataset(&mut self, dataset: ClauseDataset<Name<'cx>>) {
         for clause in dataset {
             self.insert_clause(clause);
         }
     }
 
-    pub fn insert_clause(&mut self, clause: Clause<Name>) {
+    pub fn insert_clause(&mut self, clause: Clause<Name<'cx>>) {
         // Saves current state. We will revert DB when the change is not
         // committed.
         if self.revert_point.is_none() {
@@ -89,7 +98,7 @@ impl Database {
         }
 
         // If this DB contains the given clause, then returns.
-        let serialized = if let Some(converted) = clause.convert_var_into_num() {
+        let serialized = if let Some(converted) = clause.convert_var_into_num(&self.gcx) {
             converted.to_string()
         } else {
             clause.to_string()
@@ -116,7 +125,7 @@ impl Database {
             .or_insert(vec![value]);
     }
 
-    pub fn query(&mut self, expr: Expr<Name>) -> ProveCx<'_> {
+    pub fn query(&mut self, expr: Expr<Name<'cx>>) -> ProveCx<'_, 'cx> {
         // Discards uncomitted changes.
         if let Some(revert_point) = self.revert_point.take() {
             self.revert(revert_point);
@@ -161,15 +170,15 @@ impl Database {
 
         // === Internal helper functions ===
 
-        struct ConversionMap<'a, F> {
+        struct ConversionMap<'a, 'cx, F> {
             int_to_str: Map<Int, String>,
             // e.g. 0 -> No suffix, 1 -> _1, 2 -> _2, ...
             sanitized_to_suffix: Map<&'a str, u32>,
-            int2name: &'a IndexMap<Int, Name>,
+            int2name: &'a IdxMap<'cx, Int, Name<'cx>>,
             sanitizer: F,
         }
 
-        impl<F: FnMut(&str) -> &str> ConversionMap<'_, F> {
+        impl<F: FnMut(&str) -> &str> ConversionMap<'_, '_, F> {
             fn int_to_str(&mut self, int: Int) -> &str {
                 self.int_to_str.entry(int).or_insert_with(|| {
                     let name = self.int2name.get(&int).unwrap();
@@ -220,7 +229,7 @@ impl Database {
 
         fn write_term<F: FnMut(&str) -> &str>(
             term: TermView<'_, Int>,
-            conv_map: &mut ConversionMap<'_, F>,
+            conv_map: &mut ConversionMap<'_, '_, F>,
             prolog_text: &mut String,
         ) {
             let functor = term.functor();
@@ -244,7 +253,7 @@ impl Database {
 
         fn write_expr<F: FnMut(&str) -> &str>(
             expr: ExprView<'_, Int>,
-            conv_map: &mut ConversionMap<'_, F>,
+            conv_map: &mut ConversionMap<'_, '_, F>,
             prolog_text: &mut String,
         ) {
             match expr.as_kind() {
@@ -318,12 +327,6 @@ impl Database {
     }
 }
 
-impl Default for Database {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 struct DatabaseState {
     clauses_len: Vec<usize>,
@@ -333,16 +336,16 @@ struct DatabaseState {
 }
 
 #[derive(Clone)]
-pub struct ClauseIter<'a> {
+pub struct ClauseIter<'a, 'cx> {
     clauses: &'a IndexMap<Predicate<Int>, Vec<ClauseId>>,
     stor: &'a TermStorage<Int>,
-    int2name: &'a IndexMap<Int, Name>,
+    int2name: &'a IdxMap<'cx, Int, Name<'cx>>,
     i: usize,
     j: usize,
 }
 
-impl<'a> Iterator for ClauseIter<'a> {
-    type Item = ClauseRef<'a>;
+impl<'a, 'cx> Iterator for ClauseIter<'a, 'cx> {
+    type Item = ClauseRef<'a, 'cx>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let id = loop {
@@ -365,21 +368,21 @@ impl<'a> Iterator for ClauseIter<'a> {
     }
 }
 
-impl iter::FusedIterator for ClauseIter<'_> {}
+impl iter::FusedIterator for ClauseIter<'_, '_> {}
 
-pub struct ClauseRef<'a> {
+pub struct ClauseRef<'a, 'cx> {
     id: ClauseId,
     stor: &'a TermStorage<Int>,
-    int2name: &'a IndexMap<Int, Name>,
+    int2name: &'a IdxMap<'cx, Int, Name<'cx>>,
 }
 
-impl<'a> ClauseRef<'a> {
-    pub fn head(&self) -> NamedTermView<'a> {
+impl<'a, 'cx> ClauseRef<'a, 'cx> {
+    pub fn head(&self) -> NamedTermView<'a, 'cx> {
         let head = self.stor.get_term(self.id.head);
         NamedTermView::new(head, self.int2name)
     }
 
-    pub fn body(&self) -> Option<NamedExprView<'a>> {
+    pub fn body(&self) -> Option<NamedExprView<'a, 'cx>> {
         self.id.body.map(|id| {
             let body = self.stor.get_expr(id);
             NamedExprView::new(body, self.int2name)
@@ -387,7 +390,7 @@ impl<'a> ClauseRef<'a> {
     }
 }
 
-impl fmt::Display for ClauseRef<'_> {
+impl fmt::Display for ClauseRef<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.head(), f)?;
 
@@ -400,7 +403,7 @@ impl fmt::Display for ClauseRef<'_> {
     }
 }
 
-impl fmt::Debug for ClauseRef<'_> {
+impl fmt::Debug for ClauseRef<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut d = f.debug_struct("Clause");
 
@@ -416,9 +419,9 @@ impl fmt::Debug for ClauseRef<'_> {
     }
 }
 
-impl Clause<Name> {
+impl<'cx> Clause<Name<'cx>> {
     /// Turns variables into `_$0`, `_$1`, and so on.
-    pub(crate) fn convert_var_into_num(&self) -> Option<Self> {
+    pub(crate) fn convert_var_into_num(&self, gcx: &GlobalCx<'cx>) -> Option<Self> {
         let mut cloned: Option<Self> = None;
 
         let mut i = 0;
@@ -426,9 +429,9 @@ impl Clause<Name> {
         while let Some(var) = find_var_in_clause(cloned.as_ref().unwrap_or(self)) {
             let from = var.clone();
 
-            let mut convert = |term: &Term<Name>| {
+            let mut convert = |term: &Term<Name<'_>>| {
                 (term == &from).then_some(Term {
-                    functor: format!("_{VAR_PREFIX}{i}").into(),
+                    functor: Name::create(gcx, &format!("_{VAR_PREFIX}{i}")),
                     args: [].into(),
                 })
             };
@@ -448,7 +451,9 @@ impl Clause<Name> {
 
         // === Internal helper functions ===
 
-        fn find_var_in_clause(clause: &Clause<Name>) -> Option<&Term<Name>> {
+        fn find_var_in_clause<'a, 'cx>(
+            clause: &'a Clause<Name<'cx>>,
+        ) -> Option<&'a Term<Name<'cx>>> {
             let var = find_var_in_term(&clause.head);
             if var.is_some() {
                 return var;
@@ -456,7 +461,7 @@ impl Clause<Name> {
             find_var_in_expr(clause.body.as_ref()?)
         }
 
-        fn find_var_in_expr(expr: &Expr<Name>) -> Option<&Term<Name>> {
+        fn find_var_in_expr<'a, 'cx>(expr: &'a Expr<Name<'cx>>) -> Option<&'a Term<Name<'cx>>> {
             match expr {
                 Expr::Term(term) => find_var_in_term(term),
                 Expr::Not(inner) => find_var_in_expr(inner),
@@ -464,7 +469,7 @@ impl Clause<Name> {
             }
         }
 
-        fn find_var_in_term(term: &Term<Name>) -> Option<&Term<Name>> {
+        fn find_var_in_term<'a, 'cx>(term: &'a Term<Name<'cx>>) -> Option<&'a Term<Name<'cx>>> {
             const _: () = assert!(VAR_PREFIX == '$');
 
             if term.is_variable() && !term.functor.starts_with("_$") {
@@ -476,13 +481,13 @@ impl Clause<Name> {
     }
 }
 
-pub struct NamedTermViewIter<'a> {
+pub struct NamedTermViewIter<'a, 'cx> {
     term_iter: TermViewIter<'a, Int>,
-    int2name: &'a IndexMap<Int, Name>,
+    int2name: &'a IdxMap<'cx, Int, Name<'cx>>,
 }
 
-impl<'a> Iterator for NamedTermViewIter<'a> {
-    type Item = NamedTermView<'a>;
+impl<'a, 'cx> Iterator for NamedTermViewIter<'a, 'cx> {
+    type Item = NamedTermView<'a, 'cx>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.term_iter
@@ -491,7 +496,7 @@ impl<'a> Iterator for NamedTermViewIter<'a> {
     }
 }
 
-impl iter::FusedIterator for NamedTermViewIter<'_> {}
+impl iter::FusedIterator for NamedTermViewIter<'_, '_> {}
 
 #[cfg(test)]
 mod tests {
@@ -503,25 +508,31 @@ mod tests {
 
     #[test]
     fn test_parse() {
-        fn assert(text: &str) {
-            let clause: Clause<Name> = parse::parse_str(text).unwrap();
+        fn assert(gcx: &GlobalCx<'_>, text: &str) {
+            let clause: Clause<Name<'_>> = parse::parse_str(gcx, text).unwrap();
             assert_eq!(text, clause.to_string());
         }
 
-        assert("f.");
-        assert("f(a, b).");
-        assert("f(a, b) :- f.");
-        assert("f(a, b) :- f(a).");
-        assert("f(a, b) :- f(a), f(b).");
-        assert("f(a, b) :- f(a); f(b).");
-        assert("f(a, b) :- f(a), (f(b); f(c)).");
+        let interner = DroplessInterner::default();
+        let gcx = GlobalCx {
+            interner: &interner,
+        };
+
+        assert(&gcx, "f.");
+        assert(&gcx, "f(a, b).");
+        assert(&gcx, "f(a, b) :- f.");
+        assert(&gcx, "f(a, b) :- f(a).");
+        assert(&gcx, "f(a, b) :- f(a), f(b).");
+        assert(&gcx, "f(a, b) :- f(a); f(b).");
+        assert(&gcx, "f(a, b) :- f(a), (f(b); f(c)).");
     }
 
     #[test]
     fn test_serial_queries() {
-        let mut db = Database::new();
+        let interner = DroplessInterner::default();
+        let mut db = Database::new(&interner);
 
-        fn insert(db: &mut Database) {
+        fn insert(db: &mut Database<'_>) {
             insert_dataset(
                 db,
                 r"
@@ -532,9 +543,9 @@ mod tests {
             );
         }
 
-        fn query(db: &mut Database) {
+        fn query(db: &mut Database<'_>) {
             let query = "g($X).";
-            let query: Expr<Name> = parse::parse_str(query).unwrap();
+            let query: Expr<Name<'_>> = parse::parse_str(db.gcx(), query).unwrap();
             let answer = collect_answer(db.query(query));
 
             let expected = [["$X = a"], ["$X = b"]];
@@ -562,7 +573,8 @@ mod tests {
     }
 
     fn test_not_expression() {
-        let mut db = Database::new();
+        let interner = DroplessInterner::default();
+        let mut db = Database::new(&interner);
 
         insert_dataset(
             &mut db,
@@ -573,18 +585,19 @@ mod tests {
         );
 
         let query = "f(a).";
-        let query: Expr<Name> = parse::parse_str(query).unwrap();
+        let query: Expr<Name> = parse::parse_str(db.gcx(), query).unwrap();
         let answer = collect_answer(db.query(query));
         assert!(answer.is_empty());
 
         let query = "f(b).";
-        let query: Expr<Name> = parse::parse_str(query).unwrap();
+        let query: Expr<Name> = parse::parse_str(db.gcx(), query).unwrap();
         let answer = collect_answer(db.query(query));
         assert_eq!(answer.len(), 1);
     }
 
     fn test_and_expression() {
-        let mut db = Database::new();
+        let interner = DroplessInterner::default();
+        let mut db = Database::new(&interner);
 
         insert_dataset(
             &mut db,
@@ -597,7 +610,7 @@ mod tests {
         );
 
         let query = "f($X).";
-        let query: Expr<Name> = parse::parse_str(query).unwrap();
+        let query: Expr<Name> = parse::parse_str(db.gcx(), query).unwrap();
         let answer = collect_answer(db.query(query));
 
         let expected = [["$X = b"]];
@@ -606,7 +619,8 @@ mod tests {
     }
 
     fn test_or_expression() {
-        let mut db = Database::new();
+        let interner = DroplessInterner::default();
+        let mut db = Database::new(&interner);
 
         insert_dataset(
             &mut db,
@@ -618,7 +632,7 @@ mod tests {
         );
 
         let query = "f($X).";
-        let query: Expr<Name> = parse::parse_str(query).unwrap();
+        let query: Expr<Name> = parse::parse_str(db.gcx(), query).unwrap();
         let answer = collect_answer(db.query(query));
 
         let expected = [["$X = a"], ["$X = b"]];
@@ -627,7 +641,8 @@ mod tests {
     }
 
     fn test_mixed_expression() {
-        let mut db = Database::new();
+        let interner = DroplessInterner::default();
+        let mut db = Database::new(&interner);
 
         insert_dataset(
             &mut db,
@@ -646,7 +661,7 @@ mod tests {
         );
 
         let query = "f($X).";
-        let query: Expr<Name> = parse::parse_str(query).unwrap();
+        let query: Expr<Name> = parse::parse_str(db.gcx(), query).unwrap();
         let answer = collect_answer(db.query(query));
 
         let expected = [["$X = b"]];
@@ -661,7 +676,8 @@ mod tests {
     }
 
     fn test_simple_recursion() {
-        let mut db = Database::new();
+        let interner = DroplessInterner::default();
+        let mut db = Database::new(&interner);
 
         insert_dataset(
             &mut db,
@@ -674,7 +690,7 @@ mod tests {
         );
 
         let query = "impl(Clone, $T).";
-        let query: Expr<Name> = parse::parse_str(query).unwrap();
+        let query: Expr<Name<'_>> = parse::parse_str(db.gcx(), query).unwrap();
         let mut cx = db.query(query);
 
         let mut assert_next = |expected: &[&str]| {
@@ -695,7 +711,8 @@ mod tests {
     }
 
     fn test_right_recursion() {
-        let mut db = Database::new();
+        let interner = DroplessInterner::default();
+        let mut db = Database::new(&interner);
 
         insert_dataset(
             &mut db,
@@ -709,7 +726,7 @@ mod tests {
         );
 
         let query = "descend($X, $Y).";
-        let query: Expr<Name> = parse::parse_str(query).unwrap();
+        let query: Expr<Name<'_>> = parse::parse_str(db.gcx(), query).unwrap();
         let mut answer = collect_answer(db.query(query));
 
         let mut expected = [
@@ -728,20 +745,21 @@ mod tests {
 
     #[test]
     fn test_discarding_uncomitted_change() {
-        let mut db = Database::new();
+        let interner = DroplessInterner::default();
+        let mut db = Database::new(&interner);
 
         let text = "f(a).";
-        let clause = parse::parse_str(text).unwrap();
+        let clause = parse::parse_str(db.gcx(), text).unwrap();
         db.insert_clause(clause);
         let fa_state = db.state();
         db.commit();
 
         let text = "f(b).";
-        let clause = parse::parse_str(text).unwrap();
+        let clause = parse::parse_str(db.gcx(), text).unwrap();
         db.insert_clause(clause);
 
         let query = "f($X).";
-        let query: Expr<Name> = parse::parse_str(query).unwrap();
+        let query: Expr<Name<'_>> = parse::parse_str(db.gcx(), query).unwrap();
         let answer = collect_answer(db.query(query));
 
         // `f(b).` was discarded.
@@ -751,12 +769,12 @@ mod tests {
     }
 
     fn insert_dataset(db: &mut Database, text: &str) {
-        let dataset: ClauseDataset<Name> = parse::parse_str(text).unwrap();
+        let dataset: ClauseDataset<Name<'_>> = parse::parse_str(db.gcx(), text).unwrap();
         db.insert_dataset(dataset);
         db.commit();
     }
 
-    fn collect_answer(mut cx: ProveCx<'_>) -> Vec<Vec<String>> {
+    fn collect_answer(mut cx: ProveCx<'_, '_>) -> Vec<Vec<String>> {
         let mut v = Vec::new();
         while let Some(eval) = cx.prove_next() {
             let x = eval.map(|assign| assign.to_string()).collect::<Vec<_>>();

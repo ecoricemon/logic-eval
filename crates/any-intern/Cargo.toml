@@ -1,0 +1,26 @@
+[package]
+name = "any-intern"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "A simple interner"
+readme = "README.md"
+repository = "https://github.com/ecoricemon/logic-eval"
+license = "Apache-2.0 OR MIT"
+keywords = ["intern", "interner"]
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+bumpalo = { workspace = true }
+fxhash = { workspace = true }
+hashbrown = { workspace = true }
+parking_lot = { workspace = true }
+paste = { workspace = true }
+
+# Test with sanitizer
+[[example]]
+name = "asan"
+path = "tests-san/leak.rs"
+crate-type = ["bin"]
