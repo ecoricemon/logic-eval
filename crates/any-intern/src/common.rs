@@ -1,5 +1,6 @@
 use parking_lot::{RawMutex, lock_api::RawMutex as _};
 use std::{
+    borrow::Borrow,
     cell::UnsafeCell,
     fmt,
     hash::{Hash, Hasher},
@@ -44,6 +45,12 @@ impl<T: ?Sized> Eq for Interned<'_, T> {}
 impl<T: Hash + ?Sized> Hash for Interned<'_, T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.0.hash(state)
+    }
+}
+
+impl<T: ?Sized> Borrow<T> for Interned<'_, T> {
+    fn borrow(&self) -> &T {
+        self.0
     }
 }
 
