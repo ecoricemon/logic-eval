@@ -1,4 +1,4 @@
-use super::common::{self, Interned, ManualMutex, RawInterned};
+use super::common::{self, Interned, RawInterned, UnsafeLock};
 use bumpalo::Bump;
 use hashbrown::{HashTable, hash_table::Entry};
 use std::{
@@ -24,7 +24,7 @@ use std::{
 /// #[derive(PartialEq, Eq, Hash, Debug)]
 /// struct A(u32);
 ///
-/// let interner = AnyInterner::new::<A>();
+/// let interner = AnyInterner::of::<A>();
 ///
 /// unsafe {
 ///     let a1 = interner.intern(A(42));
@@ -42,22 +42,22 @@ use std::{
 /// that the correct type is used when interacting with the interner. Using an incorrect type can
 /// lead to undefined behavior.
 pub struct AnyInterner<S = fxhash::FxBuildHasher> {
-    inner: ManualMutex<AnyInternSet<S>>,
+    inner: UnsafeLock<AnyInternSet<S>>,
 }
 
 impl AnyInterner {
-    pub fn new<K: 'static>() -> Self {
-        Self {
-            inner: ManualMutex::new(AnyInternSet::new::<K>()),
-        }
+    pub fn of<K: 'static>() -> Self {
+        // Safety: Only one instance
+        let inner = unsafe { UnsafeLock::new(AnyInternSet::of::<K>()) };
+        Self { inner }
     }
 }
 
 impl<S: BuildHasher> AnyInterner<S> {
     pub fn with_hasher<K: 'static>(hash_builder: S) -> Self {
-        Self {
-            inner: ManualMutex::new(AnyInternSet::with_hasher::<K>(hash_builder)),
-        }
+        // Safety: Only one instance
+        let inner = unsafe { UnsafeLock::new(AnyInternSet::with_hasher::<K>(hash_builder)) };
+        Self { inner }
     }
 
     /// Returns number of values the interner contains.
@@ -83,7 +83,7 @@ impl<S: BuildHasher> AnyInterner<S> {
     /// #[derive(PartialEq, Eq, Hash, Debug)]
     /// struct A(u32);
     ///
-    /// let interner = AnyInterner::new::<A>();
+    /// let interner = AnyInterner::of::<A>();
     ///
     /// unsafe {
     ///     let a1 = interner.intern(A(42));
@@ -128,7 +128,7 @@ impl<S: BuildHasher> AnyInterner<S> {
     ///     }
     /// }
     ///
-    /// let interner = AnyInterner::new::<A>();
+    /// let interner = AnyInterner::of::<A>();
     ///
     /// unsafe {
     ///     let a = interner.intern_with(&42, || A(42));
@@ -167,7 +167,7 @@ impl<S: BuildHasher> AnyInterner<S> {
     /// ```
     /// use any_intern::AnyInterner;
     ///
-    /// let interner = AnyInterner::new::<i32>();
+    /// let interner = AnyInterner::of::<i32>();
     /// unsafe {
     ///     interner.intern(42);
     ///     assert_eq!(*interner.get::<i32, _>(&42).unwrap(), &42);
@@ -206,7 +206,7 @@ impl<S: BuildHasher> AnyInterner<S> {
     {
         // Safety: Mutex unlocking is paired with the locking.
         unsafe {
-            let set = self.inner.lock().as_mut().unwrap_unchecked();
+            let set = self.inner.lock().as_mut();
             let ret = f(set);
             self.inner.unlock();
             ret
@@ -225,7 +225,7 @@ impl<S: BuildHasher> AnyInterner<S> {
 /// #[derive(PartialEq, Eq, Hash, Debug)]
 /// struct A(u32);
 ///
-/// let mut set = AnyInternSet::new::<A>();
+/// let mut set = AnyInternSet::of::<A>();
 ///
 /// unsafe {
 ///     let a1 = set.intern(A(42)).raw();
@@ -249,7 +249,7 @@ pub struct AnyInternSet<S = fxhash::FxBuildHasher> {
 }
 
 impl AnyInternSet {
-    pub fn new<K: 'static>() -> Self {
+    pub fn of<K: 'static>() -> Self {
         Self {
             arena: AnyArena::of::<K>(),
             set: HashTable::new(),
@@ -300,7 +300,7 @@ impl<S: BuildHasher> AnyInternSet<S> {
     /// #[derive(PartialEq, Eq, Hash, Debug)]
     /// struct A(u32);
     ///
-    /// let mut set = AnyInternSet::new::<A>();
+    /// let mut set = AnyInternSet::of::<A>();
     ///
     /// unsafe {
     ///     let a1 = set.intern(A(42)).raw();
@@ -360,7 +360,7 @@ impl<S: BuildHasher> AnyInternSet<S> {
     ///     }
     /// }
     ///
-    /// let mut set = AnyInternSet::new::<A>();
+    /// let mut set = AnyInternSet::of::<A>();
     ///
     /// unsafe {
     ///     let a = set.intern_with(&42, || A(42));
@@ -416,7 +416,7 @@ impl<S: BuildHasher> AnyInternSet<S> {
     /// ```
     /// use any_intern::AnyInternSet;
     ///
-    /// let mut set = AnyInternSet::new::<i32>();
+    /// let mut set = AnyInternSet::of::<i32>();
     /// unsafe {
     ///     set.intern(42);
     ///     assert_eq!(*set.get::<i32, _>(&42).unwrap(), &42);
@@ -575,7 +575,7 @@ mod tests {
         #[derive(PartialEq, Eq, Hash, Debug)]
         struct A(i32);
 
-        let interner = AnyInterner::new::<A>();
+        let interner = AnyInterner::of::<A>();
 
         unsafe {
             let a = interner.intern(A(0));

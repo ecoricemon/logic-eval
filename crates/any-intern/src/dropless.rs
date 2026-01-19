@@ -1,4 +1,4 @@
-use super::common::{Interned, ManualMutex, RawInterned};
+use super::common::{Interned, RawInterned, UnsafeLock};
 use bumpalo::Bump;
 use hashbrown::{HashTable, hash_table::Entry};
 use std::{
@@ -210,7 +210,7 @@ impl<T: Dropless + Hash + Eq, E: Dropless + Hash + Eq> Dropless for Result<T, E>
 /// memory safety and alignment when interacting with the interner.
 #[derive(Debug)]
 pub struct DroplessInterner<S = fxhash::FxBuildHasher> {
-    inner: ManualMutex<DroplessInternSet<S>>,
+    inner: UnsafeLock<DroplessInternSet<S>>,
 }
 
 impl DroplessInterner {
@@ -221,9 +221,9 @@ impl DroplessInterner {
 
 impl<S: BuildHasher> DroplessInterner<S> {
     pub fn with_hasher(hash_builder: S) -> Self {
-        Self {
-            inner: ManualMutex::new(DroplessInternSet::with_hasher(hash_builder)),
-        }
+        // Safety: Only one instance
+        let inner = unsafe { UnsafeLock::new(DroplessInternSet::with_hasher(hash_builder)) };
+        Self { inner }
     }
 
     /// Returns number of values the interner contains.
@@ -306,7 +306,7 @@ impl<S: BuildHasher> DroplessInterner<S> {
     {
         // Safety: Mutex unlocking is paired with the locking.
         unsafe {
-            let set = self.inner.lock().as_mut().unwrap_unchecked();
+            let set = self.inner.lock().as_mut();
             let ret = f(set);
             self.inner.unlock();
             ret
@@ -316,9 +316,9 @@ impl<S: BuildHasher> DroplessInterner<S> {
 
 impl<S: Default> Default for DroplessInterner<S> {
     fn default() -> Self {
-        Self {
-            inner: ManualMutex::new(DroplessInternSet::default()),
-        }
+        // Safety: Only one instance
+        let inner = unsafe { UnsafeLock::new(DroplessInternSet::default()) };
+        Self { inner }
     }
 }
 

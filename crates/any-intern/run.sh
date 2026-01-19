@@ -12,6 +12,7 @@ help() {
     echo "  -r    : Release mode."
     echo "  -a    : Debug & Release modes."
     echo "  -asan : Test with address sanitizer. Available with test only."
+    echo "  -tsan : Test with thread sanitizer. Available with test only."
     echo "  -R    : Run recursively."
     exit 1
 }
@@ -106,6 +107,18 @@ test_asan() {
     fi
 }
 
+test_tsan() {
+    local ret=0
+
+    print_title "Test with thread sanitizer"
+	RUSTFLAGS="-Zsanitizer=thread" \
+        cargo +nightly run --example tsan -Z build-std --target $(get_host_triple)
+    ret=$?
+    if [ $ret -ne 0 ]; then
+        exit $ret
+    fi
+}
+
 run_examples() {
     local files=$(grep '^path = "examples/' Cargo.toml | sed -E 's|.*/([^/]+)\.rs"|\1|')
     local names=(${files})
@@ -162,6 +175,11 @@ do
             is_release=0
             test_kind="asan"
             ;;
+        -tsan)
+            is_debug=0
+            is_release=0
+            test_kind="tsan"
+            ;;
         -rep)
             is_debug=0
             is_release=0
@@ -183,6 +201,8 @@ case $cmd in
     test)
         if [ "$test_kind" == "asan" ]; then
             test_asan
+        elif [ "$test_kind" == "tsan" ]; then
+            test_tsan
         else
             test_debug
             test_release

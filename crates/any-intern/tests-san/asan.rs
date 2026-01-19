@@ -25,7 +25,7 @@ fn test_any_interner_should_call_drop() {
     #[derive(PartialEq, Eq, Hash)]
     struct A(Box<u32>);
 
-    let interner = AnyInterner::new::<A>();
+    let interner = AnyInterner::of::<A>();
 
     const N: u32 = 1000;
     for i in 0..N {

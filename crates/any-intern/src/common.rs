@@ -6,6 +6,7 @@ use std::{
     ops,
     ptr::{self, NonNull},
     slice,
+    sync::Arc,
 };
 
 /// Due to [`Private`], clients must create this type through [`Interned::unique`], but still
@@ -95,45 +96,87 @@ impl fmt::Debug for RawInterned {
 #[derive(Clone, Copy)]
 pub struct Private;
 
-/// Clients must unlock this mutex manually after successful locking.
-pub struct ManualMutex<T> {
-    mutex: RawMutex,
-    data: UnsafeCell<T>,
+#[derive(Clone)]
+pub struct UnsafeLock<T: ?Sized> {
+    inner: Arc<ManualMutex<T>>,
 }
 
-impl<T> ManualMutex<T> {
-    pub(crate) const fn new(value: T) -> Self {
+/// Unlike [`Mutex`], this lock is `Send` and `Sync` regardless of whether `T` is `Send` or not.
+/// That's because `T` is always under the protection of this lock whenever clients uphold the
+/// safety of the lock.
+///
+/// # Safety
+///
+/// There must be no copies of the value inside this lock. Clients must not have copies before
+/// and after creation of this lock. Because this lock assumes that the value inside the lock
+/// has no copies, so the lock is `Send` and `Sync` even if `T` isn't.  
+/// For example, imagine that you have multiple `Rc<T>`, which is not `Send`, and make
+/// `UnsafeLock<Rc<T>>` from one copy of them, then you send the lock to another thread. It can
+/// cause data race because of `Rc<T>` outside this lock.  
+/// But if you have only one `T` and wrap it within `UnsafeLock`, then `T` is guaranteed to be
+/// protected by this lock. Making copies of `UnsafeLock<T>`, sending it to another thread, and
+/// accessing it from another thread does not break the guarantee. But you still can make copies
+/// of `T` from its pointer, but you shouldn't.
+///
+/// [`Mutex`]: std::sync::Mutex
+unsafe impl<T: ?Sized> Send for UnsafeLock<T> {}
+unsafe impl<T: ?Sized> Sync for UnsafeLock<T> {}
+
+impl<T> UnsafeLock<T> {
+    /// # Safety
+    ///
+    /// There must be no copies of the value. See [`Send implementation`].
+    ///
+    /// [`Send implementation`]: UnsafeLock<T>#impl-Send-for-UnsafeLock<T>
+    pub unsafe fn new(value: T) -> Self {
         Self {
-            mutex: RawMutex::INIT,
-            data: UnsafeCell::new(value),
+            inner: Arc::new(ManualMutex {
+                mutex: RawMutex::INIT,
+                data: UnsafeCell::new(value),
+            }),
         }
     }
+}
 
-    /// Caller should call to [`unlock`](Self::unlock).
-    pub fn lock(&self) -> *mut T {
-        self.mutex.lock();
-        self.data.get()
+impl<T: ?Sized> UnsafeLock<T> {
+    /// # Safety
+    ///
+    /// * Do not dereference to the returned pointer after [`unlock`](Self::unlock).
+    /// * Do not make copies of `T` from the returned pointer. See [`Send implementation`].
+    ///
+    /// [`Send implementation`]: UnsafeLock<T>#impl-Send-for-UnsafeLock<T>
+    pub unsafe fn lock(&self) -> NonNull<T> {
+        self.inner.mutex.lock();
+        unsafe { NonNull::new_unchecked(self.inner.data.get()) }
     }
 
     /// # Safety
     ///
-    /// Must be paired with successful locking.
+    /// Must follow [`lock`](Self::lock).
     pub unsafe fn unlock(&self) {
-        unsafe { self.mutex.unlock() };
+        unsafe { self.inner.mutex.unlock() };
     }
 }
 
-impl<T: fmt::Debug> fmt::Debug for ManualMutex<T> {
+impl<T: fmt::Debug> fmt::Debug for UnsafeLock<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Safety: Lock & unlock are paired with each other.
         unsafe {
-            let t = self.lock().as_ref().unwrap_unchecked();
+            let t = self.lock().as_ref();
             let ret = fmt::Debug::fmt(t, f);
             self.unlock();
             ret
         }
     }
 }
+
+struct ManualMutex<T: ?Sized> {
+    mutex: RawMutex,
+    data: UnsafeCell<T>,
+}
+
+unsafe impl<T: Send + ?Sized> Send for ManualMutex<T> {}
+unsafe impl<T: Send + ?Sized> Sync for ManualMutex<T> {}
 
 pub(crate) unsafe fn cast_then_drop_slice<T>(ptr: *mut u8, num_elems: usize) {
     unsafe {

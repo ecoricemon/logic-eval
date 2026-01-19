@@ -8,7 +8,7 @@ mod typed;
 // === Re-exports ===
 
 pub use any::{AnyArena, AnyInternSet, AnyInterner};
-pub use common::{Interned, ManualMutex};
+pub use common::{Interned, UnsafeLock};
 pub use dropless::{Dropless, DroplessInternSet, DroplessInterner};
 pub use typed::TypedArena;
 
@@ -59,7 +59,7 @@ use std::{
 /// ```
 pub struct Interner<S = fxhash::FxBuildHasher> {
     /// Intern storage for static types.
-    pub anys: ManualMutex<HashMap<TypeId, AnyInternSet, S>>,
+    pub anys: UnsafeLock<HashMap<TypeId, AnyInternSet, S>>,
 
     /// Intern storage for dropless types.
     pub dropless: DroplessInterner,
@@ -274,7 +274,7 @@ impl<S: BuildHasher> Interner<S> {
         self.with_any_sets(|sets| {
             let set = sets
                 .entry(TypeId::of::<K>())
-                .or_insert_with(|| AnyInternSet::new::<K>());
+                .or_insert_with(|| AnyInternSet::of::<K>());
             f(set)
         })
     }
@@ -287,7 +287,7 @@ impl<S: BuildHasher> Interner<S> {
     {
         // Safety: Mutex unlocking is paired with the locking.
         unsafe {
-            let sets = self.anys.lock().as_mut().unwrap_unchecked();
+            let sets = self.anys.lock().as_mut();
             let ret = f(sets);
             self.anys.unlock();
             ret
@@ -297,8 +297,10 @@ impl<S: BuildHasher> Interner<S> {
 
 impl<S: Default> Default for Interner<S> {
     fn default() -> Self {
+        // Safety: Only one instance
+        let anys = unsafe { UnsafeLock::new(HashMap::default()) };
         Self {
-            anys: ManualMutex::new(HashMap::default()),
+            anys,
             dropless: DroplessInterner::default(),
         }
     }

@@ -41,7 +41,7 @@ use any_intern::AnyInterner;
 #[derive(PartialEq, Eq, Hash, Debug)]
 struct A(u32);
 
-let interner = AnyInterner::new::<A>();
+let interner = AnyInterner::of::<A>();
 unsafe {
     let a1 = interner.intern(A(42));
     let a2 = interner.intern(A(42));
