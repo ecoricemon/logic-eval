@@ -59,10 +59,10 @@ use std::{
 /// ```
 pub struct Interner<S = fxhash::FxBuildHasher> {
     /// Intern storage for static types.
-    anys: ManualMutex<HashMap<TypeId, AnyInternSet, S>>,
+    pub anys: ManualMutex<HashMap<TypeId, AnyInternSet, S>>,
 
     /// Intern storage for dropless types.
-    dropless: DroplessInterner,
+    pub dropless: DroplessInterner,
 }
 
 impl Interner {
