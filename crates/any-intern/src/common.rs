@@ -31,7 +31,7 @@ impl<'a, T: ?Sized> Interned<'a, T> {
     }
 }
 
-impl<'a, T> Interned<'a, T> {
+impl<'a, T: ?Sized> Interned<'a, T> {
     /// # Safety
     ///
     /// Value pointed by the given `raw` must be alive in an interner.
@@ -39,7 +39,9 @@ impl<'a, T> Interned<'a, T> {
         let ref_ = unsafe { raw.0.as_ref() };
         Self(ref_, Prv)
     }
+}
 
+impl<'a, T> Interned<'a, T> {
     /// # Safety
     ///
     /// * Value pointed by the given `raw` must be alive in an interner.
