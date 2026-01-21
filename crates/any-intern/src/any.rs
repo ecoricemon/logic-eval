@@ -323,11 +323,11 @@ impl<S: BuildHasher> AnyInternSet<S> {
             let eq = Self::table_eq::<K, K>(&value);
             let hasher = Self::table_hasher::<K, K>(&self.hash_builder);
             match self.set.entry(hash, eq, hasher) {
-                Entry::Occupied(entry) => Interned::from_raw(*entry.get()),
+                Entry::Occupied(entry) => Interned::from_erased_raw(*entry.get()),
                 Entry::Vacant(entry) => {
                     let ref_ = self.arena.alloc(value);
                     let interned = Interned::unique(ref_);
-                    let raw = interned.raw();
+                    let raw = interned.erased_raw();
                     entry.insert(raw);
                     interned
                 }
@@ -393,12 +393,12 @@ impl<S: BuildHasher> AnyInternSet<S> {
             let eq = Self::table_eq::<K, Q>(key);
             let hasher = Self::table_hasher::<K, Q>(&self.hash_builder);
             match self.set.entry(hash, eq, hasher) {
-                Entry::Occupied(entry) => Interned::from_raw(*entry.get()),
+                Entry::Occupied(entry) => Interned::from_erased_raw(*entry.get()),
                 Entry::Vacant(entry) => {
                     let value = make_value();
                     let ref_ = self.arena.alloc(value);
                     let interned = Interned::unique(ref_);
-                    let raw = interned.raw();
+                    let raw = interned.erased_raw();
                     entry.insert(raw);
                     interned
                 }
@@ -437,7 +437,9 @@ impl<S: BuildHasher> AnyInternSet<S> {
         unsafe {
             let hash = Self::hash(&self.hash_builder, key);
             let eq = Self::table_eq::<K, Q>(key);
-            self.set.find(hash, eq).map(|raw| Interned::from_raw(*raw))
+            self.set
+                .find(hash, eq)
+                .map(|raw| Interned::from_erased_raw(*raw))
         }
     }
 

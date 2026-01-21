@@ -8,7 +8,7 @@ mod typed;
 // === Re-exports ===
 
 pub use any::{AnyArena, AnyInternSet, AnyInterner};
-pub use common::{Interned, UnsafeLock};
+pub use common::{Interned, RawInterned, UnsafeLock};
 pub use dropless::{Dropless, DroplessInternSet, DroplessInterner};
 pub use typed::TypedArena;
 
@@ -313,20 +313,61 @@ mod tests {
 
     #[test]
     #[rustfmt::skip]
-    fn test_interner() {
-        #[derive(PartialEq, Eq, Hash)]
-        struct A(i32);
-        #[derive(PartialEq, Eq, Hash)]
-        struct B(i32);
+    fn test_interner_various_types() {
+        #[derive(PartialEq, Eq, Hash)] struct A(i32);
+        #[derive(PartialEq, Eq, Hash)] struct B(i32);
 
         let interner = Interner::new();
 
         let groups: [&[RawInterned]; _] = [
-            &[interner.intern_static(A(0)).raw(), interner.intern_static(A(0)).raw()],
-            &[interner.intern_static(A(1)).raw()],
-            &[interner.intern_static(B(0)).raw(), interner.intern_static(B(0)).raw()],
-            &[interner.intern_static(B(1)).raw()],
+            &[interner.intern_static(A(0)).erased_raw(), interner.intern_static(A(0)).erased_raw()],
+            &[interner.intern_static(A(1)).erased_raw()],
+            &[interner.intern_static(B(0)).erased_raw(), interner.intern_static(B(0)).erased_raw()],
+            &[interner.intern_static(B(1)).erased_raw()],
         ];
         common::assert_group_addr_eq(&groups);
+    }
+
+    // Address insdie Interned<'_, T> must be valid while the interner lives.
+    #[test]
+    fn test_fixed_memory_after_huge_number_of_interninig() {
+        const TEST_SIZE_IN_BYTES: isize = 1024 * 1024 * 5; // 5 MB
+
+        let interner = Interner::new();
+
+        let mut remain_bytes = TEST_SIZE_IN_BYTES;
+        let mut interned_usize = Vec::new();
+        for i in 0_usize.. {
+            if remain_bytes < 0 {
+                break;
+            }
+            let value = i;
+            remain_bytes -= size_of_val(&value) as isize;
+
+            let interned = interner.intern_static(value);
+            interned_usize.push(interned);
+        }
+
+        let mut remain_bytes = TEST_SIZE_IN_BYTES;
+        let mut interned_str = Vec::new();
+        for i in 0.. {
+            if remain_bytes < 0 {
+                break;
+            }
+            let value = i.to_string();
+            let value = value.as_str();
+            remain_bytes -= size_of_val(&value) as isize;
+
+            let interned = interner.intern_dropless(value);
+            interned_str.push(interned);
+        }
+
+        // Test will pass if the data have not moved.
+        for (i, interned) in interned_usize.into_iter().enumerate() {
+            assert_eq!(i, **interned)
+        }
+        for (i, interned) in interned_str.into_iter().enumerate() {
+            assert_eq!(&i.to_string(), *interned);
+        }
     }
 }

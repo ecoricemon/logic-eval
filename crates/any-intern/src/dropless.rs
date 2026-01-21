@@ -363,7 +363,7 @@ impl<S: BuildHasher> DroplessInternSet<S> {
                     ptr::copy_nonoverlapping(src.as_ptr(), dst.as_ptr(), layout.size());
 
                     let occupied = entry.insert(DynInternEntry {
-                        data: RawInterned(dst),
+                        data: RawInterned(dst).cast(),
                         layout,
                         hash: <K as Dropless>::hash,
                     });
@@ -419,7 +419,8 @@ impl<S: BuildHasher> DroplessInternSet<S> {
     ) -> impl FnMut(&DynInternEntry<S>) -> bool {
         move |entry: &DynInternEntry<S>| unsafe {
             if align == entry.layout.align() {
-                let entry_bytes = slice::from_raw_parts(entry.data.as_ptr(), entry.layout.size());
+                let entry_bytes =
+                    slice::from_raw_parts(entry.data.cast::<u8>().as_ptr(), entry.layout.size());
                 <K as Dropless>::eq(key, entry_bytes)
             } else {
                 false
@@ -430,7 +431,8 @@ impl<S: BuildHasher> DroplessInternSet<S> {
     /// Returns `hasher` closure that is used for some methods on the [`HashTable`].
     fn table_hasher(hash_builder: &S) -> impl Fn(&DynInternEntry<S>) -> u64 {
         |entry: &DynInternEntry<S>| unsafe {
-            let entry_bytes = slice::from_raw_parts(entry.data.as_ptr(), entry.layout.size());
+            let entry_bytes =
+                slice::from_raw_parts(entry.data.cast::<u8>().as_ptr(), entry.layout.size());
             // Safety: `entry_bytes` is aligned for the entry hash function.
             (entry.hash)(hash_builder, entry_bytes)
         }
@@ -438,7 +440,8 @@ impl<S: BuildHasher> DroplessInternSet<S> {
 
     unsafe fn ref_from_entry<'a, K: Dropless + ?Sized>(entry: &DynInternEntry<S>) -> &'a K {
         unsafe {
-            let bytes = slice::from_raw_parts(entry.data.as_ptr(), entry.layout.size());
+            let bytes =
+                slice::from_raw_parts(entry.data.cast::<u8>().as_ptr(), entry.layout.size());
             K::from_bytes(bytes)
         }
     }
@@ -480,11 +483,11 @@ mod tests {
     fn test_dropless_interner_int() {
         let interner = DroplessInterner::new();
 
-        let a = interner.intern(&0_u32).raw();
-        let b = interner.intern(&0_u32).raw();
-        let c = interner.intern(&1_u32).raw();
+        let a = interner.intern(&0_u32).erased_raw();
+        let b = interner.intern(&0_u32).erased_raw();
+        let c = interner.intern(&1_u32).erased_raw();
         // d has the same bytes and layout as c's, so memory will be shared.
-        let d = interner.intern(&1_i32).raw();
+        let d = interner.intern(&1_i32).erased_raw();
 
         let groups: [&[RawInterned]; _] = [&[a, b], &[c, d]];
         common::assert_group_addr_eq(&groups);
@@ -493,10 +496,10 @@ mod tests {
     fn test_dropless_interner_str() {
         let interner = DroplessInterner::new();
 
-        let a = interner.intern("apple").raw();
-        let b = interner.intern(*Box::new("apple")).raw();
-        let c = interner.intern(&*String::from("apple")).raw();
-        let d = interner.intern("banana").raw();
+        let a = interner.intern("apple").erased_raw();
+        let b = interner.intern(*Box::new("apple")).erased_raw();
+        let c = interner.intern(&*String::from("apple")).erased_raw();
+        let d = interner.intern("banana").erased_raw();
 
         let groups: [&[RawInterned]; _] = [&[a, b, c], &[d]];
         common::assert_group_addr_eq(&groups);
@@ -505,11 +508,11 @@ mod tests {
     fn test_dropless_interner_bytes() {
         let interner = DroplessInterner::new();
 
-        let a = interner.intern(&[0, 1]).raw();
+        let a = interner.intern(&[0, 1]).erased_raw();
         let boxed: Box<[i32]> = Box::new([0, 1]);
-        let b = interner.intern(&*boxed).raw();
-        let c = interner.intern(&*vec![0, 1]).raw();
-        let d = interner.intern(&[2, 3]).raw();
+        let b = interner.intern(&*boxed).erased_raw();
+        let c = interner.intern(&*vec![0, 1]).erased_raw();
+        let d = interner.intern(&[2, 3]).erased_raw();
 
         let groups: [&[RawInterned]; _] = [&[a, b, c], &[d]];
         common::assert_group_addr_eq(&groups);
@@ -545,9 +548,9 @@ mod tests {
             let int = &(i as u32); // 4 bytes
             let str_ = &*strs[i]; // greater than 4 btyes
             let bytes = &[i as u16]; // 2 bytes
-            interned_int.push(interner.intern(int).raw());
-            interned_str.push(interner.intern(str_).raw());
-            interned_bytes.push(interner.intern(bytes).raw());
+            interned_int.push(interner.intern(int).erased_raw());
+            interned_str.push(interner.intern(str_).erased_raw());
+            interned_bytes.push(interner.intern(bytes).erased_raw());
         }
 
         // Verifies every pointer is unique.
@@ -616,9 +619,9 @@ mod tests {
             let t4 = T4(i as u16, [4; _]);
             let t8 = T8(i as u16, [8; _]);
             let t16 = T16(i as u16, [16; _]);
-            interned_4.push(interner.intern(&t4).raw());
-            interned_8.push(interner.intern(&t8).raw());
-            interned_16.push(interner.intern(&t16).raw());
+            interned_4.push(interner.intern(&t4).erased_raw());
+            interned_8.push(interner.intern(&t8).erased_raw());
+            interned_16.push(interner.intern(&t16).erased_raw());
         }
 
         for i in 0..N {
@@ -626,9 +629,9 @@ mod tests {
             let t8 = T8(i as u16, [8; _]);
             let t16 = T16(i as u16, [16; _]);
             unsafe {
-                assert_eq!(*<Interned<'_, T4>>::from_raw(interned_4[i]), &t4);
-                assert_eq!(*<Interned<'_, T8>>::from_raw(interned_8[i]), &t8);
-                assert_eq!(*<Interned<'_, T16>>::from_raw(interned_16[i]), &t16);
+                assert_eq!(*<Interned<'_, T4>>::from_erased_raw(interned_4[i]), &t4);
+                assert_eq!(*<Interned<'_, T8>>::from_erased_raw(interned_8[i]), &t8);
+                assert_eq!(*<Interned<'_, T16>>::from_erased_raw(interned_16[i]), &t16);
             }
         }
     }

@@ -10,26 +10,43 @@ use std::{
     sync::Arc,
 };
 
-/// Due to [`Private`], clients must create this type through [`Interned::unique`], but still
-/// allowed to use pattern match.
-pub struct Interned<'a, T: ?Sized>(pub &'a T, Private);
+/// Due to [`Prv`], clients cannot make this type directly, but still allowed to use pattern
+/// match.
+pub struct Interned<'a, T: ?Sized>(pub &'a T, Prv);
 
 impl<'a, T: ?Sized> Interned<'a, T> {
-    /// Caller should guarantee that the value is unique in an interner.
-    pub fn unique(value: &'a T) -> Self {
-        Self(value, Private)
+    pub fn raw(&self) -> RawInterned<T> {
+        let ptr = NonNull::from_ref(self.0);
+        RawInterned(ptr)
     }
 
-    pub fn raw(&self) -> RawInterned {
-        let ptr = NonNull::from_ref(self.0).cast::<u8>();
+    pub fn erased_raw(&self) -> RawInterned {
+        let ptr = NonNull::from_ref(self.0).cast::<Prv>();
         RawInterned(ptr)
+    }
+
+    /// Caller should guarantee that the value is unique in an interner.
+    pub(crate) fn unique(value: &'a T) -> Self {
+        Self(value, Prv)
     }
 }
 
 impl<'a, T> Interned<'a, T> {
-    pub(crate) unsafe fn from_raw(raw: RawInterned) -> Self {
+    /// # Safety
+    ///
+    /// Value pointed by the given `raw` must be alive in an interner.
+    pub unsafe fn from_raw(raw: RawInterned<T>) -> Self {
+        let ref_ = unsafe { raw.0.as_ref() };
+        Self(ref_, Prv)
+    }
+
+    /// # Safety
+    ///
+    /// * Value pointed by the given `raw` must be alive in an interner.
+    /// * Type must be correct.
+    pub unsafe fn from_erased_raw(raw: RawInterned) -> Self {
         let ref_ = unsafe { raw.0.cast::<T>().as_ref() };
-        Self(ref_, Private)
+        Self(ref_, Prv)
     }
 }
 
@@ -82,26 +99,33 @@ impl<T: fmt::Display + ?Sized> fmt::Display for Interned<'_, T> {
     }
 }
 
-// This is exposed as public, but clients cannot make this type directly.
+// Clients are not allowed to make this type directly.
 #[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
-pub struct RawInterned(pub(crate) NonNull<u8>);
+pub struct RawInterned<T: ?Sized = Prv>(pub(crate) NonNull<T>);
 
-impl ops::Deref for RawInterned {
-    type Target = NonNull<u8>;
+impl<T: ?Sized> RawInterned<T> {
+    #[inline]
+    pub fn cast<U>(self) -> RawInterned<U> {
+        RawInterned(self.0.cast())
+    }
+}
+
+impl<T: ?Sized> ops::Deref for RawInterned<T> {
+    type Target = NonNull<T>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl fmt::Debug for RawInterned {
+impl<T: ?Sized> fmt::Debug for RawInterned<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(f)
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct Private;
+#[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
+pub struct Prv;
 
 #[derive(Clone)]
 pub struct UnsafeLock<T: ?Sized> {

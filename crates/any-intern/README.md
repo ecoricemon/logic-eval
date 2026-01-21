@@ -24,7 +24,7 @@ let a1 = interner.intern_static(A(42));
 let a2 = interner.intern_static(A(42));
 let b1 = interner.intern_static(B(42));
 assert_eq!(a1, a2); // Same value, same reference
-assert_ne!(a1.raw(), b1.raw()); // Different value, different reference
+assert_ne!(a1.erased_raw(), b1.erased_raw()); // Different value, different reference
 
 let s1 = interner.intern_dropless("hello");
 let s2 = interner.intern_dropless(&*String::from("hello"));
