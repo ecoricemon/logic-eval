@@ -52,14 +52,27 @@ impl<'a, T> Interned<'a, T> {
     }
 }
 
+/// Compares data addresses only, which is sufficient for interned values.
 impl<T: ?Sized> PartialEq for Interned<'_, T> {
-    /// Compares data addresses only, which is sufficient for interned values.
     fn eq(&self, other: &Self) -> bool {
         ptr::addr_eq(self.0, other.0)
     }
 }
 
+/// Compares data addresses only, which is sufficient for interned values.
 impl<T: ?Sized> Eq for Interned<'_, T> {}
+
+impl<T: PartialOrd + ?Sized> PartialOrd for Interned<'_, T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.0.partial_cmp(other.0)
+    }
+}
+
+impl<T: Ord + ?Sized> Ord for Interned<'_, T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0.cmp(other.0)
+    }
+}
 
 impl<T: Hash + ?Sized> Hash for Interned<'_, T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -73,14 +86,6 @@ impl<T: ?Sized> Borrow<T> for Interned<'_, T> {
     }
 }
 
-impl<T: ?Sized> Clone for Interned<'_, T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<T: ?Sized> Copy for Interned<'_, T> {}
-
 impl<'a, T: ?Sized> ops::Deref for Interned<'a, T> {
     type Target = &'a T;
 
@@ -88,6 +93,14 @@ impl<'a, T: ?Sized> ops::Deref for Interned<'a, T> {
         &self.0
     }
 }
+
+impl<T: ?Sized> Clone for Interned<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: ?Sized> Copy for Interned<'_, T> {}
 
 impl<T: fmt::Debug + ?Sized> fmt::Debug for Interned<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -102,13 +115,51 @@ impl<T: fmt::Display + ?Sized> fmt::Display for Interned<'_, T> {
 }
 
 // Clients are not allowed to make this type directly.
-#[derive(Clone, Copy, PartialOrd, Ord, PartialEq, Eq, Hash)]
 pub struct RawInterned<T: ?Sized = Prv>(pub(crate) NonNull<T>);
 
 impl<T: ?Sized> RawInterned<T> {
     #[inline]
     pub fn cast<U>(self) -> RawInterned<U> {
         RawInterned(self.0.cast())
+    }
+}
+
+/// Pointer comparison by address.
+impl<T: ?Sized> PartialEq for RawInterned<T> {
+    fn eq(&self, other: &Self) -> bool {
+        ptr::addr_eq(self.0.as_ptr(), other.0.as_ptr())
+    }
+}
+
+/// Pointer comparison by address.
+impl<T: ?Sized> Eq for RawInterned<T> {}
+
+/// Pointer comparison by address.
+impl<T: ?Sized> PartialOrd for RawInterned<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Pointer comparison by address.
+impl<T: ?Sized> Ord for RawInterned<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.0
+            .as_ptr()
+            .cast::<()>()
+            .cmp(&other.0.as_ptr().cast::<()>())
+    }
+}
+
+impl<T: ?Sized> Hash for RawInterned<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.0.hash(state)
+    }
+}
+
+impl<T: ?Sized> Borrow<NonNull<T>> for RawInterned<T> {
+    fn borrow(&self) -> &NonNull<T> {
+        &self.0
     }
 }
 
@@ -119,6 +170,14 @@ impl<T: ?Sized> ops::Deref for RawInterned<T> {
         &self.0
     }
 }
+
+impl<T: ?Sized> Clone for RawInterned<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: ?Sized> Copy for RawInterned<T> {}
 
 impl<T: ?Sized> fmt::Debug for RawInterned<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
