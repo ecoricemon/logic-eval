@@ -86,11 +86,17 @@ impl<T: ?Sized> Borrow<T> for Interned<'_, T> {
     }
 }
 
+impl<T: ?Sized> AsRef<T> for Interned<'_, T> {
+    fn as_ref(&self) -> &T {
+        self.0
+    }
+}
+
 impl<'a, T: ?Sized> ops::Deref for Interned<'a, T> {
-    type Target = &'a T;
+    type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.0
+        self.0
     }
 }
 
@@ -114,12 +120,29 @@ impl<T: fmt::Display + ?Sized> fmt::Display for Interned<'_, T> {
     }
 }
 
+/// A same type with the [`Interned`], but with erased lifetime.
+///
+/// Although lifetime is erased, `RawInterned` still has type, so it can be used when type is
+/// required. You can also erase type too by calling to [`erase`](Self::erase).
+///
+/// # Note
+///
+/// `RawInterned` is just pointer type and points to the type `T` in memory. If `T` is ZST or DST
+/// but containing no data like empty string, the pointer would be non-null, well-aligned, but
+/// dangling. So it's discouraged to compare type erased `RawInterned`s because they would have the
+/// same dangling pointers even though they were different types.
+//
 // Clients are not allowed to make this type directly.
 pub struct RawInterned<T: ?Sized = Prv>(pub(crate) NonNull<T>);
 
 impl<T: ?Sized> RawInterned<T> {
     #[inline]
     pub fn cast<U>(self) -> RawInterned<U> {
+        RawInterned(self.0.cast())
+    }
+
+    #[inline]
+    pub fn erase(self) -> RawInterned {
         RawInterned(self.0.cast())
     }
 }

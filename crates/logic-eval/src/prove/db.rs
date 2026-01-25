@@ -1,20 +1,19 @@
 use super::{
     prover::{
-        IdxMap, Int, NameIntMap, NameIntMapState, ProveCx, Prover,
+        Integer, NameIntMap, NameIntMapState, ProveCx, Prover,
         format::{NamedExprView, NamedTermView},
     },
     repr::{ClauseId, TermStorage, TermStorageLen},
 };
 use crate::{
-    Map,
+    ClauseDatasetIn, ClauseIn, ExprIn, Int2Name, Intern, Map,
     parse::{
-        GlobalCx, VAR_PREFIX,
-        repr::{Clause, ClauseDataset, Expr, Predicate, Term},
+        VAR_PREFIX,
+        repr::{Clause, Expr, Predicate, Term},
         text::Name,
     },
     prove::repr::{ExprKind, ExprView, TermView, TermViewIter},
 };
-use any_intern::DroplessInterner;
 use indexmap::{IndexMap, IndexSet};
 use std::{
     fmt::{self, Write},
@@ -22,15 +21,15 @@ use std::{
 };
 
 #[derive(Debug)]
-pub struct Database<'cx> {
+pub struct Database<'int, Int: Intern> {
     /// Clause id dataset.
-    clauses: IndexMap<Predicate<Int>, Vec<ClauseId>>,
+    clauses: IndexMap<Predicate<Integer>, Vec<ClauseId>>,
 
     /// We do not allow duplicated clauses in the dataset.
     clause_texts: IndexSet<String>,
 
     /// Term and expression storage.
-    stor: TermStorage<Int>,
+    stor: TermStorage<Integer>,
 
     /// Proof search engine.
     prover: Prover,
@@ -39,42 +38,41 @@ pub struct Database<'cx> {
     ///
     /// [`Int`] is internally used for fast comparison, but we need to get it
     /// back to [`Name`] for the clients.
-    nimap: NameIntMap<'cx>,
+    nimap: NameIntMap<'int, Int>,
 
     /// States of DB's fields.
     ///
     /// This is used when we discard some changes on the DB.
     revert_point: Option<DatabaseState>,
 
-    gcx: GlobalCx<'cx>,
+    interner: &'int Int,
 }
 
-impl<'cx> Database<'cx> {
-    pub fn new(interner: &'cx DroplessInterner) -> Self {
-        let gcx = GlobalCx { interner };
+impl<'int, Int: Intern> Database<'int, Int> {
+    pub fn new(interner: &'int Int) -> Self {
         Self {
             clauses: IndexMap::default(),
             clause_texts: IndexSet::default(),
             stor: TermStorage::new(),
             prover: Prover::new(),
-            nimap: NameIntMap::new(gcx),
+            nimap: NameIntMap::new(interner),
             revert_point: None,
-            gcx,
+            interner,
         }
     }
 
-    pub fn gcx(&self) -> &GlobalCx<'cx> {
-        &self.gcx
+    pub fn interner(&self) -> &'int Int {
+        self.interner
     }
 
-    pub fn terms(&self) -> NamedTermViewIter<'_, 'cx> {
+    pub fn terms(&self) -> NamedTermViewIter<'_, 'int, Int> {
         NamedTermViewIter {
             term_iter: self.stor.terms.terms(),
             int2name: &self.nimap.int2name,
         }
     }
 
-    pub fn clauses(&self) -> ClauseIter<'_, 'cx> {
+    pub fn clauses(&self) -> ClauseIter<'_, 'int, Int> {
         ClauseIter {
             clauses: &self.clauses,
             stor: &self.stor,
@@ -84,13 +82,13 @@ impl<'cx> Database<'cx> {
         }
     }
 
-    pub fn insert_dataset(&mut self, dataset: ClauseDataset<Name<'cx>>) {
+    pub fn insert_dataset(&mut self, dataset: ClauseDatasetIn<'int, Int>) {
         for clause in dataset {
             self.insert_clause(clause);
         }
     }
 
-    pub fn insert_clause(&mut self, clause: Clause<Name<'cx>>) {
+    pub fn insert_clause(&mut self, clause: ClauseIn<'int, Int>) {
         // Saves current state. We will revert DB when the change is not
         // committed.
         if self.revert_point.is_none() {
@@ -98,11 +96,12 @@ impl<'cx> Database<'cx> {
         }
 
         // If this DB contains the given clause, then returns.
-        let serialized = if let Some(converted) = clause.convert_var_into_num(&self.gcx) {
-            converted.to_string()
-        } else {
-            clause.to_string()
-        };
+        let serialized =
+            if let Some(converted) = Clause::convert_var_into_num(&clause, self.interner) {
+                converted.to_string()
+            } else {
+                clause.to_string()
+            };
         if !self.clause_texts.insert(serialized) {
             return;
         }
@@ -125,7 +124,7 @@ impl<'cx> Database<'cx> {
             .or_insert(vec![value]);
     }
 
-    pub fn query(&mut self, expr: Expr<Name<'cx>>) -> ProveCx<'_, 'cx> {
+    pub fn query(&mut self, expr: ExprIn<'int, Int>) -> ProveCx<'_, 'int, Int> {
         // Discards uncomitted changes.
         if let Some(revert_point) = self.revert_point.take() {
             self.revert(revert_point);
@@ -170,18 +169,23 @@ impl<'cx> Database<'cx> {
 
         // === Internal helper functions ===
 
-        struct ConversionMap<'a, 'cx, F> {
-            int_to_str: Map<Int, String>,
+        struct ConversionMap<'a, 'int, Int: Intern, F> {
+            int_to_str: Map<Integer, String>,
             // e.g. 0 -> No suffix, 1 -> _1, 2 -> _2, ...
             sanitized_to_suffix: Map<&'a str, u32>,
-            int2name: &'a IdxMap<'cx, Int, Name<'cx>>,
+            int2name: &'a Int2Name<'int, Int>,
             sanitizer: F,
         }
 
-        impl<F: FnMut(&str) -> &str> ConversionMap<'_, '_, F> {
-            fn int_to_str(&mut self, int: Int) -> &str {
+        impl<Int, F> ConversionMap<'_, '_, Int, F>
+        where
+            Int: Intern,
+            F: FnMut(&str) -> &str,
+        {
+            fn int_to_str(&mut self, int: Integer) -> &str {
                 self.int_to_str.entry(int).or_insert_with(|| {
                     let name = self.int2name.get(&int).unwrap();
+                    let name: &str = name.as_ref();
 
                     let mut is_var = false;
 
@@ -227,11 +231,14 @@ impl<'cx> Database<'cx> {
             }
         }
 
-        fn write_term<F: FnMut(&str) -> &str>(
-            term: TermView<'_, Int>,
-            conv_map: &mut ConversionMap<'_, '_, F>,
+        fn write_term<Int, F>(
+            term: TermView<'_, Integer>,
+            conv_map: &mut ConversionMap<'_, '_, Int, F>,
             prolog_text: &mut String,
-        ) {
+        ) where
+            Int: Intern,
+            F: FnMut(&str) -> &str,
+        {
             let functor = term.functor();
             let args = term.args();
             let num_args = args.len();
@@ -251,11 +258,14 @@ impl<'cx> Database<'cx> {
             }
         }
 
-        fn write_expr<F: FnMut(&str) -> &str>(
-            expr: ExprView<'_, Int>,
-            conv_map: &mut ConversionMap<'_, '_, F>,
+        fn write_expr<Int, F>(
+            expr: ExprView<'_, Integer>,
+            conv_map: &mut ConversionMap<'_, '_, Int, F>,
             prolog_text: &mut String,
-        ) {
+        ) where
+            Int: Intern,
+            F: FnMut(&str) -> &str,
+        {
             match expr.as_kind() {
                 ExprKind::Term(term) => {
                     write_term(term, conv_map, prolog_text);
@@ -336,16 +346,16 @@ struct DatabaseState {
 }
 
 #[derive(Clone)]
-pub struct ClauseIter<'a, 'cx> {
-    clauses: &'a IndexMap<Predicate<Int>, Vec<ClauseId>>,
-    stor: &'a TermStorage<Int>,
-    int2name: &'a IdxMap<'cx, Int, Name<'cx>>,
+pub struct ClauseIter<'a, 'int, Int: Intern> {
+    clauses: &'a IndexMap<Predicate<Integer>, Vec<ClauseId>>,
+    stor: &'a TermStorage<Integer>,
+    int2name: &'a Int2Name<'int, Int>,
     i: usize,
     j: usize,
 }
 
-impl<'a, 'cx> Iterator for ClauseIter<'a, 'cx> {
-    type Item = ClauseRef<'a, 'cx>;
+impl<'a, 'int, Int: Intern> Iterator for ClauseIter<'a, 'int, Int> {
+    type Item = ClauseRef<'a, 'int, Int>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let id = loop {
@@ -368,21 +378,21 @@ impl<'a, 'cx> Iterator for ClauseIter<'a, 'cx> {
     }
 }
 
-impl iter::FusedIterator for ClauseIter<'_, '_> {}
+impl<Int: Intern> iter::FusedIterator for ClauseIter<'_, '_, Int> {}
 
-pub struct ClauseRef<'a, 'cx> {
+pub struct ClauseRef<'a, 'int, Int: Intern> {
     id: ClauseId,
-    stor: &'a TermStorage<Int>,
-    int2name: &'a IdxMap<'cx, Int, Name<'cx>>,
+    stor: &'a TermStorage<Integer>,
+    int2name: &'a Int2Name<'int, Int>,
 }
 
-impl<'a, 'cx> ClauseRef<'a, 'cx> {
-    pub fn head(&self) -> NamedTermView<'a, 'cx> {
+impl<'a, 'int, Int: Intern> ClauseRef<'a, 'int, Int> {
+    pub fn head(&self) -> NamedTermView<'a, 'int, Int> {
         let head = self.stor.get_term(self.id.head);
         NamedTermView::new(head, self.int2name)
     }
 
-    pub fn body(&self) -> Option<NamedExprView<'a, 'cx>> {
+    pub fn body(&self) -> Option<NamedExprView<'a, 'int, Int>> {
         self.id.body.map(|id| {
             let body = self.stor.get_expr(id);
             NamedExprView::new(body, self.int2name)
@@ -390,7 +400,7 @@ impl<'a, 'cx> ClauseRef<'a, 'cx> {
     }
 }
 
-impl fmt::Display for ClauseRef<'_, '_> {
+impl<Int: Intern> fmt::Display for ClauseRef<'_, '_, Int> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.head(), f)?;
 
@@ -403,7 +413,7 @@ impl fmt::Display for ClauseRef<'_, '_> {
     }
 }
 
-impl fmt::Debug for ClauseRef<'_, '_> {
+impl<Int: Intern> fmt::Debug for ClauseRef<'_, '_, Int> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut d = f.debug_struct("Clause");
 
@@ -419,19 +429,22 @@ impl fmt::Debug for ClauseRef<'_, '_> {
     }
 }
 
-impl<'cx> Clause<Name<'cx>> {
+impl Clause<Name<()>> {
     /// Turns variables into `_$0`, `_$1`, and so on.
-    pub(crate) fn convert_var_into_num(&self, gcx: &GlobalCx<'cx>) -> Option<Self> {
-        let mut cloned: Option<Self> = None;
+    pub(crate) fn convert_var_into_num<'int, Int: Intern>(
+        this: &ClauseIn<'int, Int>,
+        interner: &'int Int,
+    ) -> Option<ClauseIn<'int, Int>> {
+        let mut cloned: Option<ClauseIn<'int, Int>> = None;
 
         let mut i = 0;
 
-        while let Some(var) = find_var_in_clause(cloned.as_ref().unwrap_or(self)) {
+        while let Some(var) = find_var_in_clause(cloned.as_ref().unwrap_or(this)) {
             let from = var.clone();
 
-            let mut convert = |term: &Term<Name<'_>>| {
+            let mut convert = |term: &Term<Name<_>>| {
                 (term == &from).then_some(Term {
-                    functor: Name::create(gcx, &format!("_{VAR_PREFIX}{i}")),
+                    functor: Name::with_intern(&format!("_{VAR_PREFIX}{i}"), interner),
                     args: [].into(),
                 })
             };
@@ -439,7 +452,7 @@ impl<'cx> Clause<Name<'cx>> {
             if let Some(cloned) = &mut cloned {
                 cloned.replace_term(&mut convert);
             } else {
-                let mut this = self.clone();
+                let mut this = this.clone();
                 this.replace_term(&mut convert);
                 cloned = Some(this);
             }
@@ -451,9 +464,7 @@ impl<'cx> Clause<Name<'cx>> {
 
         // === Internal helper functions ===
 
-        fn find_var_in_clause<'a, 'cx>(
-            clause: &'a Clause<Name<'cx>>,
-        ) -> Option<&'a Term<Name<'cx>>> {
+        fn find_var_in_clause<T: AsRef<str>>(clause: &Clause<Name<T>>) -> Option<&Term<Name<T>>> {
             let var = find_var_in_term(&clause.head);
             if var.is_some() {
                 return var;
@@ -461,7 +472,7 @@ impl<'cx> Clause<Name<'cx>> {
             find_var_in_expr(clause.body.as_ref()?)
         }
 
-        fn find_var_in_expr<'a, 'cx>(expr: &'a Expr<Name<'cx>>) -> Option<&'a Term<Name<'cx>>> {
+        fn find_var_in_expr<T: AsRef<str>>(expr: &Expr<Name<T>>) -> Option<&Term<Name<T>>> {
             match expr {
                 Expr::Term(term) => find_var_in_term(term),
                 Expr::Not(inner) => find_var_in_expr(inner),
@@ -469,10 +480,10 @@ impl<'cx> Clause<Name<'cx>> {
             }
         }
 
-        fn find_var_in_term<'a, 'cx>(term: &'a Term<Name<'cx>>) -> Option<&'a Term<Name<'cx>>> {
+        fn find_var_in_term<T: AsRef<str>>(term: &Term<Name<T>>) -> Option<&Term<Name<T>>> {
             const _: () = assert!(VAR_PREFIX == '$');
 
-            if term.is_variable() && !term.functor.starts_with("_$") {
+            if term.is_variable() && !term.functor.as_ref().starts_with("_$") {
                 Some(term)
             } else {
                 term.args.iter().find_map(find_var_in_term)
@@ -481,13 +492,13 @@ impl<'cx> Clause<Name<'cx>> {
     }
 }
 
-pub struct NamedTermViewIter<'a, 'cx> {
-    term_iter: TermViewIter<'a, Int>,
-    int2name: &'a IdxMap<'cx, Int, Name<'cx>>,
+pub struct NamedTermViewIter<'a, 'int, Int: Intern> {
+    term_iter: TermViewIter<'a, Integer>,
+    int2name: &'a Int2Name<'int, Int>,
 }
 
-impl<'a, 'cx> Iterator for NamedTermViewIter<'a, 'cx> {
-    type Item = NamedTermView<'a, 'cx>;
+impl<'a, 'int, Int: Intern> Iterator for NamedTermViewIter<'a, 'int, Int> {
+    type Item = NamedTermView<'a, 'int, Int>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.term_iter
@@ -496,43 +507,38 @@ impl<'a, 'cx> Iterator for NamedTermViewIter<'a, 'cx> {
     }
 }
 
-impl iter::FusedIterator for NamedTermViewIter<'_, '_> {}
+impl<Int: Intern> iter::FusedIterator for NamedTermViewIter<'_, '_, Int> {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::parse::{
         self,
-        repr::{Clause, Expr},
+        repr::{Clause, ClauseDataset, Expr},
     };
+    use any_intern::DroplessInterner;
 
     #[test]
     fn test_parse() {
-        fn assert(gcx: &GlobalCx<'_>, text: &str) {
-            let clause: Clause<Name<'_>> = parse::parse_str(gcx, text).unwrap();
+        fn assert(text: &str, interner: &impl Intern) {
+            let clause: Clause<Name<_>> = parse::parse_str(text, interner).unwrap();
             assert_eq!(text, clause.to_string());
         }
 
         let interner = DroplessInterner::default();
-        let gcx = GlobalCx {
-            interner: &interner,
-        };
 
-        assert(&gcx, "f.");
-        assert(&gcx, "f(a, b).");
-        assert(&gcx, "f(a, b) :- f.");
-        assert(&gcx, "f(a, b) :- f(a).");
-        assert(&gcx, "f(a, b) :- f(a), f(b).");
-        assert(&gcx, "f(a, b) :- f(a); f(b).");
-        assert(&gcx, "f(a, b) :- f(a), (f(b); f(c)).");
+        assert("f.", &interner);
+        assert("f(a, b).", &interner);
+        assert("f(a, b) :- f.", &interner);
+        assert("f(a, b) :- f(a).", &interner);
+        assert("f(a, b) :- f(a), f(b).", &interner);
+        assert("f(a, b) :- f(a); f(b).", &interner);
+        assert("f(a, b) :- f(a), (f(b); f(c)).", &interner);
     }
 
     #[test]
     fn test_serial_queries() {
-        let interner = DroplessInterner::default();
-        let mut db = Database::new(&interner);
-
-        fn insert(db: &mut Database<'_>) {
+        fn insert<Int: Intern>(db: &mut Database<'_, Int>) {
             insert_dataset(
                 db,
                 r"
@@ -543,15 +549,18 @@ mod tests {
             );
         }
 
-        fn query(db: &mut Database<'_>) {
+        fn query<Int: Intern>(db: &mut Database<'_, Int>) {
             let query = "g($X).";
-            let query: Expr<Name<'_>> = parse::parse_str(db.gcx(), query).unwrap();
+            let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
             let answer = collect_answer(db.query(query));
 
             let expected = [["$X = a"], ["$X = b"]];
 
             assert_eq!(answer, expected);
         }
+
+        let interner = DroplessInterner::default();
+        let mut db = Database::new(&interner);
 
         insert(&mut db);
         let org_stor_len = db.stor.len();
@@ -585,12 +594,12 @@ mod tests {
         );
 
         let query = "f(a).";
-        let query: Expr<Name> = parse::parse_str(db.gcx(), query).unwrap();
+        let query: Expr<Name<_>> = parse::parse_str(query, &interner).unwrap();
         let answer = collect_answer(db.query(query));
         assert!(answer.is_empty());
 
         let query = "f(b).";
-        let query: Expr<Name> = parse::parse_str(db.gcx(), query).unwrap();
+        let query: Expr<Name<_>> = parse::parse_str(query, &interner).unwrap();
         let answer = collect_answer(db.query(query));
         assert_eq!(answer.len(), 1);
     }
@@ -610,7 +619,7 @@ mod tests {
         );
 
         let query = "f($X).";
-        let query: Expr<Name> = parse::parse_str(db.gcx(), query).unwrap();
+        let query: Expr<Name<_>> = parse::parse_str(query, &interner).unwrap();
         let answer = collect_answer(db.query(query));
 
         let expected = [["$X = b"]];
@@ -632,7 +641,7 @@ mod tests {
         );
 
         let query = "f($X).";
-        let query: Expr<Name> = parse::parse_str(db.gcx(), query).unwrap();
+        let query: Expr<Name<_>> = parse::parse_str(query, &interner).unwrap();
         let answer = collect_answer(db.query(query));
 
         let expected = [["$X = a"], ["$X = b"]];
@@ -661,7 +670,7 @@ mod tests {
         );
 
         let query = "f($X).";
-        let query: Expr<Name> = parse::parse_str(db.gcx(), query).unwrap();
+        let query: Expr<Name<_>> = parse::parse_str(query, &interner).unwrap();
         let answer = collect_answer(db.query(query));
 
         let expected = [["$X = b"]];
@@ -690,7 +699,7 @@ mod tests {
         );
 
         let query = "impl(Clone, $T).";
-        let query: Expr<Name<'_>> = parse::parse_str(db.gcx(), query).unwrap();
+        let query: Expr<Name<_>> = parse::parse_str(query, &interner).unwrap();
         let mut cx = db.query(query);
 
         let mut assert_next = |expected: &[&str]| {
@@ -726,7 +735,7 @@ mod tests {
         );
 
         let query = "descend($X, $Y).";
-        let query: Expr<Name<'_>> = parse::parse_str(db.gcx(), query).unwrap();
+        let query: Expr<Name<_>> = parse::parse_str(query, &interner).unwrap();
         let mut answer = collect_answer(db.query(query));
 
         let mut expected = [
@@ -749,17 +758,17 @@ mod tests {
         let mut db = Database::new(&interner);
 
         let text = "f(a).";
-        let clause = parse::parse_str(db.gcx(), text).unwrap();
+        let clause = parse::parse_str(text, &interner).unwrap();
         db.insert_clause(clause);
         let fa_state = db.state();
         db.commit();
 
         let text = "f(b).";
-        let clause = parse::parse_str(db.gcx(), text).unwrap();
+        let clause = parse::parse_str(text, &interner).unwrap();
         db.insert_clause(clause);
 
         let query = "f($X).";
-        let query: Expr<Name<'_>> = parse::parse_str(db.gcx(), query).unwrap();
+        let query: Expr<Name<_>> = parse::parse_str(query, &interner).unwrap();
         let answer = collect_answer(db.query(query));
 
         // `f(b).` was discarded.
@@ -768,13 +777,13 @@ mod tests {
         assert_eq!(db.state(), fa_state);
     }
 
-    fn insert_dataset(db: &mut Database, text: &str) {
-        let dataset: ClauseDataset<Name<'_>> = parse::parse_str(db.gcx(), text).unwrap();
+    fn insert_dataset<Int: Intern>(db: &mut Database<'_, Int>, text: &str) {
+        let dataset: ClauseDataset<Name<_>> = parse::parse_str(text, db.interner()).unwrap();
         db.insert_dataset(dataset);
         db.commit();
     }
 
-    fn collect_answer(mut cx: ProveCx<'_, '_>) -> Vec<Vec<String>> {
+    fn collect_answer<Int: Intern>(mut cx: ProveCx<'_, '_, Int>) -> Vec<Vec<String>> {
         let mut v = Vec::new();
         while let Some(eval) = cx.prove_next() {
             let x = eval.map(|assign| assign.to_string()).collect::<Vec<_>>();

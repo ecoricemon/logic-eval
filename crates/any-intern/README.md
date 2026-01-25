@@ -20,15 +20,22 @@ struct A(u32);
 struct B(u32);
 
 let interner = Interner::new();
+
+// Interning static types
 let a1 = interner.intern_static(A(42));
 let a2 = interner.intern_static(A(42));
 let b1 = interner.intern_static(B(42));
 assert_eq!(a1, a2); // Same value, same reference
 assert_ne!(a1.erased_raw(), b1.erased_raw()); // Different value, different reference
 
+// Interning `Dropless` types
 let s1 = interner.intern_dropless("hello");
 let s2 = interner.intern_dropless(&*String::from("hello"));
 assert_eq!(s1, s2); // Same string, same reference
+
+// Interning `Display` types as formatted string
+let f1 = interner.intern_formatted_str(&42, 10).unwrap();
+assert_eq!(&*f1, "42");
 ```
 
 ### AnyInterner

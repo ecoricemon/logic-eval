@@ -1,27 +1,16 @@
-use crate::{Error, Result};
-use any_intern::{DroplessInterner, Interned};
+use crate::{Error, Intern, Result};
 
-pub fn parse_str<'cx, T: Parse<'cx>>(gcx: &GlobalCx<'cx>, text: &str) -> Result<T> {
+pub fn parse_str<'int, Int, T>(text: &str, interner: &'int Int) -> Result<T>
+where
+    Int: Intern,
+    T: Parse<'int, Int>,
+{
     let mut buf = ParseBuffer::new(text);
-    T::parse(&mut buf, gcx)
+    T::parse(&mut buf, interner)
 }
 
-pub trait Parse<'cx>: Sized + 'cx {
-    fn parse(buf: &mut ParseBuffer<'_>, gcx: &GlobalCx<'cx>) -> Result<Self>;
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct GlobalCx<'a> {
-    // By using concrete type here, this crate is strongly coupled with the interner crate. A new
-    // trait would good to abstract that, but it makes more complexity over the entire crate.
-    // Consider bring the approach when concrete type is not suitable anymore.
-    pub interner: &'a DroplessInterner,
-}
-
-impl<'a> GlobalCx<'a> {
-    pub fn intern_str(&self, s: &str) -> Interned<'a, str> {
-        self.interner.intern(s)
-    }
+pub trait Parse<'int, Int: Intern>: Sized + 'int {
+    fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self>;
 }
 
 #[derive(Clone, Copy)]
@@ -46,15 +35,22 @@ impl<'a> ParseBuffer<'a> {
         &self.text[self.start..self.end]
     }
 
-    pub(crate) fn parse<'cx, T: Parse<'cx>>(&mut self, gcx: &GlobalCx<'cx>) -> Result<T> {
-        T::parse(self, gcx)
+    pub(crate) fn parse<'int, Int, T>(&mut self, interner: &'int Int) -> Result<T>
+    where
+        Int: Intern,
+        T: Parse<'int, Int>,
+    {
+        T::parse(self, interner)
     }
 
-    pub(crate) fn peek_parse<'cx, T: Parse<'cx>>(&self, gcx: &GlobalCx<'cx>) -> Option<(T, Self)> {
+    pub(crate) fn peek_parse<'int, Int, T>(&self, interner: &'int Int) -> Option<(T, Self)>
+    where
+        Int: Intern,
+        T: Parse<'int, Int>,
+    {
         let mut peek = *self;
-        // FIXME: No need to create error messages, which may cause performance
-        // issue.
-        T::parse(&mut peek, gcx).ok().map(|t| (t, peek))
+        // FIXME: No need to create error messages, which may cause performance issue.
+        T::parse(&mut peek, interner).ok().map(|t| (t, peek))
     }
 }
 
@@ -66,8 +62,8 @@ impl Ident {
     }
 }
 
-impl Parse<'_> for Ident {
-    fn parse(buf: &mut ParseBuffer<'_>, _: &GlobalCx<'_>) -> Result<Self> {
+impl<Int: Intern> Parse<'_, Int> for Ident {
+    fn parse(buf: &mut ParseBuffer<'_>, _: &'_ Int) -> Result<Self> {
         fn is_allowed_first(c: char) -> bool {
             c.is_alphabetic() || !(c.is_whitespace() || RESERVED.contains(&c))
         }
@@ -110,8 +106,8 @@ impl Parse<'_> for Ident {
 
 macro_rules! impl_parse_for_string {
     ($str:literal, $ty:ident) => {
-        impl<'cx> Parse<'cx> for $ty {
-            fn parse(buf: &mut ParseBuffer<'_>, _: &GlobalCx<'cx>) -> Result<Self> {
+        impl<Int: Intern> Parse<'_, Int> for $ty {
+            fn parse(buf: &mut ParseBuffer<'_>, _: &Int) -> Result<Self> {
                 let s = buf.cur_text();
 
                 let Some(l) = s.find(|c: char| !c.is_whitespace()) else {

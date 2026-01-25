@@ -20,16 +20,25 @@ pub mod intern {
     pub use any_intern::*;
 }
 
+use std::{
+    borrow::Borrow,
+    collections::HashMap,
+    error::Error as StdError,
+    fmt::{self, Debug, Display},
+    hash::{BuildHasherDefault, Hash, Hasher},
+    result::Result as StdResult,
+};
+
 // === Hash map and set used within this crate ===
 
-pub(crate) type Map<K, V> = std::collections::HashMap<K, V, fxhash::FxBuildHasher>;
+pub(crate) type Map<K, V> = HashMap<K, V, fxhash::FxBuildHasher>;
 
 #[derive(Default, Clone, Copy)]
 struct PassThroughHasher {
     hash: u64,
 }
 
-impl std::hash::Hasher for PassThroughHasher {
+impl Hasher for PassThroughHasher {
     fn write(&mut self, _bytes: &[u8]) {
         panic!("u64 is only allowed");
     }
@@ -43,9 +52,84 @@ impl std::hash::Hasher for PassThroughHasher {
     }
 }
 
-pub(crate) type PassThroughState = std::hash::BuildHasherDefault<PassThroughHasher>;
+pub(crate) type PassThroughState = BuildHasherDefault<PassThroughHasher>;
 
 // === Result/Error used within this crate ===
 
-pub(crate) type Result<T> = std::result::Result<T, Error>;
-pub(crate) type Error = Box<dyn std::error::Error + Send + Sync>;
+pub(crate) type Result<T> = StdResult<T, Error>;
+pub(crate) type Error = Box<dyn StdError + Send + Sync>;
+
+// === Interning dependency ===
+
+pub trait Intern {
+    type InternedStr<'a>: AsRef<str> + Borrow<str> + Clone + Eq + Ord + Hash + Debug + Display
+    where
+        Self: 'a;
+
+    fn intern_formatted_str<T: Display + ?Sized>(
+        &self,
+        value: &T,
+        upper_size: usize,
+    ) -> StdResult<Self::InternedStr<'_>, fmt::Error>;
+
+    fn intern_str(&self, text: &str) -> Self::InternedStr<'_> {
+        self.intern_formatted_str(text, text.len()).unwrap()
+    }
+}
+
+impl Intern for any_intern::DroplessInterner {
+    type InternedStr<'a>
+        = any_intern::Interned<'a, str>
+    where
+        Self: 'a;
+
+    fn intern_formatted_str<T: Display + ?Sized>(
+        &self,
+        value: &T,
+        upper_size: usize,
+    ) -> StdResult<Self::InternedStr<'_>, fmt::Error> {
+        self.intern_formatted_str(value, upper_size)
+    }
+
+    fn intern_str(&self, text: &str) -> Self::InternedStr<'_> {
+        self.intern(text)
+    }
+}
+
+impl Intern for any_intern::Interner {
+    type InternedStr<'a>
+        = any_intern::Interned<'a, str>
+    where
+        Self: 'a;
+
+    fn intern_formatted_str<T: Display + ?Sized>(
+        &self,
+        value: &T,
+        upper_size: usize,
+    ) -> StdResult<Self::InternedStr<'_>, fmt::Error> {
+        self.intern_formatted_str(value, upper_size)
+    }
+
+    fn intern_str(&self, text: &str) -> Self::InternedStr<'_> {
+        self.intern_dropless(text)
+    }
+}
+
+// === Type aliases for complex `Intern` related types ===
+
+pub(crate) use intern_alias::*;
+#[allow(unused)]
+mod intern_alias {
+    use super::{Intern, parse, prove};
+    pub(crate) type NameIn<'int, Int> = parse::text::Name<<Int as Intern>::InternedStr<'int>>;
+    pub(crate) type TermIn<'int, Int> = parse::repr::Term<NameIn<'int, Int>>;
+    pub(crate) type ExprIn<'int, Int> = parse::repr::Expr<NameIn<'int, Int>>;
+    pub(crate) type ClauseIn<'int, Int> = parse::repr::Clause<NameIn<'int, Int>>;
+    pub(crate) type UniqueTermArrayIn<'int, Int> = prove::repr::UniqueTermArray<NameIn<'int, Int>>;
+    pub(crate) type TermStorageIn<'int, Int> = prove::repr::TermStorage<NameIn<'int, Int>>;
+    pub(crate) type ClauseDatasetIn<'int, Int> = parse::repr::ClauseDataset<NameIn<'int, Int>>;
+    pub(crate) type Name2Int<'int, Int> =
+        prove::prover::IdxMap<'int, NameIn<'int, Int>, prove::prover::Integer, Int>;
+    pub(crate) type Int2Name<'int, Int> =
+        prove::prover::IdxMap<'int, prove::prover::Integer, NameIn<'int, Int>, Int>;
+}

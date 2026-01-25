@@ -16,6 +16,7 @@ use std::{
     any::TypeId,
     borrow,
     collections::HashMap,
+    fmt::{self, Display},
     hash::{BuildHasher, Hash},
 };
 
@@ -147,15 +148,15 @@ impl<S: BuildHasher> Interner<S> {
     ///
     /// let a = interner.intern_static_with(&42, || A(42));
     /// assert_eq!(interner.len(), 1);
-    /// assert_eq!(*a, &A(42));
+    /// assert_eq!(*a, A(42));
     ///
     /// let b = interner.intern_static_with(&42, || A(99)); // Closure is not called
     /// assert_eq!(interner.len(), 1);
-    /// assert_eq!(*b, &A(42));
+    /// assert_eq!(*b, A(42));
     ///
     /// let c = interner.intern_static_with(&43, || A(43));
     /// assert_eq!(interner.len(), 2);
-    /// assert_eq!(*c, &A(43));
+    /// assert_eq!(*c, A(43));
     /// ```
     pub fn intern_static_with<'a, K, Q, F>(&'a self, key: &Q, make_value: F) -> Interned<'a, K>
     where
@@ -182,7 +183,7 @@ impl<S: BuildHasher> Interner<S> {
     /// let interner = Interner::new();
     /// interner.intern_static(42_u32);
     ///
-    /// assert_eq!(*interner.get::<u32, _>(&42_u32).unwrap(), &42);
+    /// assert_eq!(*interner.get::<u32, _>(&42_u32).unwrap(), 42);
     /// assert!(interner.get::<u32, _>(&99_u32).is_none());
     /// ```
     pub fn get<K, Q>(&self, key: &Q) -> Option<Interned<'_, K>>
@@ -220,6 +221,36 @@ impl<S: BuildHasher> Interner<S> {
         self.dropless.intern(value)
     }
 
+    /// Stores a value in the interner as a formatted string through [`Display`] then returns
+    /// reference to the value if the interner doesn't contain the formatted string yet.
+    ///
+    /// If the same string exists in the interner, reference to the existing string is returned.
+    ///
+    /// This method provides a buffer for making string. This will be benefit in terms of
+    /// performance when you frequently make `String` via something like `to_string()` by exploiting
+    /// chunk memory.
+    ///
+    /// If you give insufficient `upper_size`, then error is returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::Interner;
+    ///
+    /// let interner = Interner::new();
+    /// let value = 42;
+    /// let interned = interner.intern_formatted_str(&value, 10).unwrap();
+    ///
+    /// assert_eq!(&*interned, "42");
+    /// ```
+    pub fn intern_formatted_str<K: Display + ?Sized>(
+        &self,
+        value: &K,
+        upper_size: usize,
+    ) -> Result<Interned<'_, str>, fmt::Error> {
+        self.dropless.intern_formatted_str(value, upper_size)
+    }
+
     /// Retrieves a reference to a value in the interner based on the provided key.
     ///
     /// This method checks if a value corresponding to the given key exists in the interner. If it
@@ -233,7 +264,7 @@ impl<S: BuildHasher> Interner<S> {
     /// let interner = Interner::new();
     /// interner.intern_dropless("hello");
     ///
-    /// assert_eq!(interner.get_dropless("hello").as_deref(), Some(&"hello"));
+    /// assert_eq!(interner.get_dropless("hello").as_deref(), Some("hello"));
     /// assert!(interner.get_dropless("hi").is_none());
     /// ```
     pub fn get_dropless<K: Dropless + ?Sized>(&self, value: &K) -> Option<Interned<'_, K>> {
@@ -364,10 +395,10 @@ mod tests {
 
         // Test will pass if the data have not moved.
         for (i, interned) in interned_usize.into_iter().enumerate() {
-            assert_eq!(i, **interned)
+            assert_eq!(i, *interned)
         }
         for (i, interned) in interned_str.into_iter().enumerate() {
-            assert_eq!(&i.to_string(), *interned);
+            assert_eq!(*i.to_string(), *interned);
         }
     }
 }

@@ -1341,7 +1341,10 @@ fn buf_term_hash<T: Hash>(buf: &[TermElem<T>], id: TermId) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::{self, GlobalCx, text::Name};
+    use crate::{
+        Intern, TermStorageIn, UniqueTermArrayIn,
+        parse::{self, text::Name},
+    };
     use any_intern::DroplessInterner;
 
     #[test]
@@ -1353,17 +1356,14 @@ mod tests {
     fn test_expr_array_replace_term() {
         let mut buf = TermStorage::new();
         let interner = DroplessInterner::default();
-        let cx = GlobalCx {
-            interner: &interner,
-        };
 
-        let id_expr = insert_expr(&mut buf, &cx, "f(g(X)), (Y; Z), X");
+        let id_expr = insert_expr(&mut buf, &interner, "f(g(X)), (Y; Z), X");
 
         let old_len = buf.terms.buf.len();
-        let id_term_f = insert_term(&mut buf.terms, &cx, "f(g(X))");
-        let id_term_y = insert_term(&mut buf.terms, &cx, "Y");
-        let id_term_z = insert_term(&mut buf.terms, &cx, "Z");
-        let id_term_x = insert_term(&mut buf.terms, &cx, "X");
+        let id_term_f = insert_term(&mut buf.terms, &interner, "f(g(X))");
+        let id_term_y = insert_term(&mut buf.terms, &interner, "Y");
+        let id_term_z = insert_term(&mut buf.terms, &interner, "Z");
+        let id_term_x = insert_term(&mut buf.terms, &interner, "X");
         // Inserted existing terms, so that the array must have not changed.
         assert_eq!(buf.terms.buf.len(), old_len);
 
@@ -1383,12 +1383,12 @@ mod tests {
 
         assert_eq!(buf.exprs.buf, expected_buf);
 
-        let id_term_a = insert_term(&mut buf.terms, &cx, "a");
+        let id_term_a = insert_term(&mut buf.terms, &interner, "a");
         let replaced = buf.get_expr_mut(id_expr).replace_term(id_term_x, id_term_a);
         assert!(replaced);
 
         let old_len = buf.terms.buf.len();
-        let id_term_fa = insert_term(&mut buf.terms, &cx, "f(g(a))");
+        let id_term_fa = insert_term(&mut buf.terms, &interner, "f(g(a))");
         // The upper term has already been inserted to the array by the
         // replacement. So that the array must have not changed.
         assert_eq!(buf.terms.buf.len(), old_len);
@@ -1409,18 +1409,15 @@ mod tests {
     fn test_expr_array_replace_expr() {
         let mut buf = TermStorage::new();
         let interner = DroplessInterner::default();
-        let cx = GlobalCx {
-            interner: &interner,
-        };
 
-        let id_expr = insert_expr(&mut buf, &cx, "X, Y");
-        let id_to = insert_expr(&mut buf, &cx, "f(X), g(X)");
+        let id_expr = insert_expr(&mut buf, &interner, "X, Y");
+        let id_to = insert_expr(&mut buf, &interner, "f(X), g(X)");
 
         let old_len = buf.terms.buf.len();
-        let id_term_x = insert_term(&mut buf.terms, &cx, "X");
-        let id_term_y = insert_term(&mut buf.terms, &cx, "Y");
-        let id_term_fx = insert_term(&mut buf.terms, &cx, "f(X)");
-        let id_term_gx = insert_term(&mut buf.terms, &cx, "g(X)");
+        let id_term_x = insert_term(&mut buf.terms, &interner, "X");
+        let id_term_y = insert_term(&mut buf.terms, &interner, "Y");
+        let id_term_fx = insert_term(&mut buf.terms, &interner, "f(X)");
+        let id_term_gx = insert_term(&mut buf.terms, &interner, "g(X)");
         // Inserted existing terms, so that the array must have not changed.
         assert_eq!(buf.terms.buf.len(), old_len);
 
@@ -1462,31 +1459,28 @@ mod tests {
     fn test_term_array_replace() {
         let mut arr = UniqueTermArray::new();
         let interner = DroplessInterner::default();
-        let gcx = GlobalCx {
-            interner: &interner,
-        };
 
-        let id_x = insert_term(&mut arr, &gcx, "X");
-        let id_a = insert_term(&mut arr, &gcx, "a");
-        let id_f = insert_term(&mut arr, &gcx, "f(g(X), h(X, Y))");
+        let id_x = insert_term(&mut arr, &interner, "X");
+        let id_a = insert_term(&mut arr, &interner, "a");
+        let id_f = insert_term(&mut arr, &interner, "f(g(X), h(X, Y))");
 
-        let mut expected_buf: Vec<TermElem<Name>> = vec![
-            /*  0 */ TermElem::Functor(Name::create(&gcx, "X")),
+        let mut expected_buf: Vec<TermElem<Name<_>>> = vec![
+            /*  0 */ TermElem::Functor(Name::with_intern("X", &interner)),
             /*  1 */ TermElem::Arity(0),
-            /*  2 */ TermElem::Functor(Name::create(&gcx, "a")),
+            /*  2 */ TermElem::Functor(Name::with_intern("a", &interner)),
             /*  3 */ TermElem::Arity(0),
-            /*  4 */ TermElem::Functor(Name::create(&gcx, "f")),
+            /*  4 */ TermElem::Functor(Name::with_intern("f", &interner)),
             /*  5 */ TermElem::Arity(2),
             /*  6 */ TermElem::Arg(TermId(8)),
             /*  7 */ TermElem::Arg(TermId(11)),
-            /*  8 */ TermElem::Functor(Name::create(&gcx, "g")),
+            /*  8 */ TermElem::Functor(Name::with_intern("g", &interner)),
             /*  9 */ TermElem::Arity(1),
             /* 10 */ TermElem::Arg(TermId(0)),
-            /* 11 */ TermElem::Functor(Name::create(&gcx, "h")),
+            /* 11 */ TermElem::Functor(Name::with_intern("h", &interner)),
             /* 12 */ TermElem::Arity(2),
             /* 13 */ TermElem::Arg(TermId(0)),
             /* 14 */ TermElem::Arg(TermId(15)),
-            /* 15 */ TermElem::Functor(Name::create(&gcx, "Y")),
+            /* 15 */ TermElem::Functor(Name::with_intern("Y", &interner)),
             /* 16 */ TermElem::Arity(0),
         ];
 
@@ -1500,15 +1494,15 @@ mod tests {
         let replaced = arr.get_mut(id_f).replace(id_x, id_a);
         assert!(replaced);
 
-        let clone_on_replace: Vec<TermElem<Name>> = vec![
-            /* 17 */ TermElem::Functor(Name::create(&gcx, "f")),
+        let clone_on_replace: Vec<TermElem<Name<_>>> = vec![
+            /* 17 */ TermElem::Functor(Name::with_intern("f", &interner)),
             /* 18 */ TermElem::Arity(2),
             /* 19 */ TermElem::Arg(TermId(21)),
             /* 20 */ TermElem::Arg(TermId(24)),
-            /* 21 */ TermElem::Functor(Name::create(&gcx, "g")),
+            /* 21 */ TermElem::Functor(Name::with_intern("g", &interner)),
             /* 22 */ TermElem::Arity(1),
             /* 23 */ TermElem::Arg(TermId(2)),
-            /* 24 */ TermElem::Functor(Name::create(&gcx, "h")),
+            /* 24 */ TermElem::Functor(Name::with_intern("h", &interner)),
             /* 25 */ TermElem::Arity(2),
             /* 26 */ TermElem::Arg(TermId(2)),
             /* 27 */ TermElem::Arg(TermId(15)),
@@ -1521,41 +1515,38 @@ mod tests {
     fn test_recursive_term() {
         let mut arr = UniqueTermArray::new();
         let interner = DroplessInterner::default();
-        let gcx = GlobalCx {
-            interner: &interner,
-        };
 
-        insert_term(&mut arr, &gcx, "f(f(a))");
+        insert_term(&mut arr, &interner, "f(f(a))");
 
-        let expected_buf: &[TermElem<Name>] = &[
-            /*  0 */ TermElem::Functor(Name::create(&gcx, "f")),
+        let expected_buf: &[TermElem<Name<_>>] = &[
+            /*  0 */ TermElem::Functor(Name::with_intern("f", &interner)),
             /*  1 */ TermElem::Arity(1),
             /*  2 */ TermElem::Arg(TermId(3)),
-            /*  3 */ TermElem::Functor(Name::create(&gcx, "f")),
+            /*  3 */ TermElem::Functor(Name::with_intern("f", &interner)),
             /*  4 */ TermElem::Arity(1),
             /*  5 */ TermElem::Arg(TermId(6)),
-            /*  6 */ TermElem::Functor(Name::create(&gcx, "a")),
+            /*  6 */ TermElem::Functor(Name::with_intern("a", &interner)),
             /*  7 */ TermElem::Arity(0),
         ];
 
         assert_eq!(arr.buf, expected_buf);
     }
 
-    fn insert_expr<'cx>(
-        buf: &mut TermStorage<Name<'cx>>,
-        gcx: &GlobalCx<'cx>,
+    fn insert_expr<'int, Int: Intern>(
+        buf: &mut TermStorageIn<'int, Int>,
+        interner: &'int Int,
         text: &str,
     ) -> ExprId {
-        let expr: Expr<Name> = parse::parse_str(gcx, text).unwrap();
+        let expr: Expr<Name<_>> = parse::parse_str(text, interner).unwrap();
         buf.insert_expr(expr)
     }
 
-    fn insert_term<'cx>(
-        arr: &mut UniqueTermArray<Name<'cx>>,
-        gcx: &GlobalCx<'cx>,
+    fn insert_term<'int, Int: Intern>(
+        arr: &mut UniqueTermArrayIn<'int, Int>,
+        interner: &'int Int,
         text: &str,
     ) -> TermId {
-        let term: Term<Name> = parse::parse_str(gcx, text).unwrap();
+        let term: Term<Name<_>> = parse::parse_str(text, interner).unwrap();
         arr.insert(term)
     }
 }

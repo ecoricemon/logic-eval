@@ -3,10 +3,10 @@ use super::repr::{
     TermStorageLen, TermView, TermViewMut, UniqueTermArray,
 };
 use crate::{
-    Map,
+    ExprIn, Int2Name, Intern, Map, Name2Int, NameIn, TermIn,
     parse::{
-        GlobalCx, VAR_PREFIX,
-        repr::{Expr, Predicate, Term},
+        VAR_PREFIX,
+        repr::{Predicate, Term},
         text::Name,
     },
 };
@@ -14,13 +14,13 @@ use indexmap::IndexMap;
 use std::{
     borrow::Borrow,
     collections::VecDeque,
-    fmt::{self, Write},
+    fmt::{self, Debug, Write},
     hash::Hash,
     iter,
     ops::{self, Range},
 };
 
-pub(crate) type ClauseMap = IndexMap<Predicate<Int>, Vec<ClauseId>>;
+pub(crate) type ClauseMap = IndexMap<Predicate<Integer>, Vec<ClauseId>>;
 
 #[derive(Debug)]
 pub(crate) struct Prover {
@@ -80,13 +80,13 @@ impl Prover {
         self.queue.clear();
     }
 
-    pub(crate) fn prove<'a, 'cx>(
+    pub(crate) fn prove<'a, 'int, Int: Intern>(
         &'a mut self,
-        query: Expr<Name<'cx>>,
+        query: ExprIn<'int, Int>,
         clause_map: &'a ClauseMap,
-        stor: &'a mut TermStorage<Int>,
-        nimap: &'a mut NameIntMap<'cx>,
-    ) -> ProveCx<'a, 'cx> {
+        stor: &'a mut TermStorage<Integer>,
+        nimap: &'a mut NameIntMap<'int, Int>,
+    ) -> ProveCx<'a, 'int, Int> {
         self.clear();
 
         let old_nimap_state = nimap.state();
@@ -96,7 +96,7 @@ impl Prover {
         self.query = stor.insert_expr(query);
 
         stor.get_expr(self.query)
-            .with_term(&mut |term: TermView<'_, Int>| {
+            .with_term(&mut |term: TermView<'_, Integer>| {
                 term.with_variable(&mut |term| self.query_vars.push(term.id));
             });
 
@@ -120,7 +120,7 @@ impl Prover {
         &mut self,
         node_index: usize,
         clause_map: &ClauseMap,
-        stor: &mut TermStorage<Int>,
+        stor: &mut TermStorage<Integer>,
     ) -> Option<bool> {
         let node = self.nodes[node_index].clone();
         let node_expr = match node.kind {
@@ -214,7 +214,7 @@ impl Prover {
             },
         }
 
-        fn assume_leftmost_term(expr: ExprView<'_, Int>, to: bool) -> AssumeResult {
+        fn assume_leftmost_term(expr: ExprView<'_, Integer>, to: bool) -> AssumeResult {
             match expr.as_kind() {
                 ExprKind::Term(_) => AssumeResult::Complete {
                     eval: to,
@@ -276,20 +276,20 @@ impl Prover {
     // it is considered as a different clause.
     fn convert_var_into_temp(
         mut clause_id: ClauseId,
-        stor: &mut TermStorage<Int>,
+        stor: &mut TermStorage<Integer>,
         temp_var_buf: &mut Map<TermId, TermId>,
         temp_var_int: &mut u32,
     ) -> ClauseId {
         debug_assert!(temp_var_buf.is_empty());
 
-        let mut f = |terms: &mut UniqueTermArray<Int>, term_id: TermId| {
+        let mut f = |terms: &mut UniqueTermArray<Integer>, term_id: TermId| {
             let term = terms.get_mut(term_id);
             if term.is_variable() {
                 let src = term.id();
 
                 temp_var_buf.entry(src).or_insert_with(|| {
                     let temp_term = Term {
-                        functor: Int::temporary(*temp_var_int),
+                        functor: Integer::temporary(*temp_var_int),
                         args: [].into(),
                     };
                     *temp_var_int += 1;
@@ -323,7 +323,7 @@ impl Prover {
         &mut self,
         node_index: usize,
         clause: ClauseId,
-        stor: &mut TermStorage<Int>,
+        stor: &mut TermStorage<Integer>,
     ) -> Option<Node> {
         debug_assert!(self.uni_op.ops.is_empty());
 
@@ -441,7 +441,7 @@ impl UnificationOperator {
     #[must_use]
     fn consume_ops(
         &mut self,
-        stor: &mut TermStorage<Int>,
+        stor: &mut TermStorage<Integer>,
         mut left: ExprId,
         mut right: ClauseId,
     ) -> (ExprId, ClauseId, Range<usize>) {
@@ -499,21 +499,21 @@ enum UnifyOp {
     Right { from: TermId, to: TermId },
 }
 
-pub struct ProveCx<'a, 'cx> {
+pub struct ProveCx<'a, 'int, Int: Intern> {
     prover: &'a mut Prover,
     clause_map: &'a ClauseMap,
-    stor: &'a mut TermStorage<Int>,
-    nimap: &'a mut NameIntMap<'cx>,
+    stor: &'a mut TermStorage<Integer>,
+    nimap: &'a mut NameIntMap<'int, Int>,
     old_stor_len: TermStorageLen,
     old_nimap_state: NameIntMapState,
 }
 
-impl<'a, 'cx> ProveCx<'a, 'cx> {
+impl<'a, 'int, Int: Intern> ProveCx<'a, 'int, Int> {
     fn new(
         prover: &'a mut Prover,
         clause_map: &'a ClauseMap,
-        stor: &'a mut TermStorage<Int>,
-        nimap: &'a mut NameIntMap<'cx>,
+        stor: &'a mut TermStorage<Integer>,
+        nimap: &'a mut NameIntMap<'int, Int>,
         old_stor_len: TermStorageLen,
         old_nimap_state: NameIntMapState,
     ) -> Self {
@@ -527,7 +527,7 @@ impl<'a, 'cx> ProveCx<'a, 'cx> {
         }
     }
 
-    pub fn prove_next(&mut self) -> Option<EvalView<'_, 'cx>> {
+    pub fn prove_next(&mut self) -> Option<EvalView<'_, 'int, Int>> {
         while let Some(node_index) = self.prover.queue.pop_front() {
             if let Some(proof_result) =
                 self.prover
@@ -554,32 +554,32 @@ impl<'a, 'cx> ProveCx<'a, 'cx> {
     }
 }
 
-impl Drop for ProveCx<'_, '_> {
+impl<Int: Intern> Drop for ProveCx<'_, '_, Int> {
     fn drop(&mut self) {
         self.stor.truncate(self.old_stor_len.clone());
         self.nimap.revert(self.old_nimap_state.clone());
     }
 }
 
-pub struct EvalView<'a, 'cx> {
+pub struct EvalView<'a, 'int, Int: Intern> {
     query_vars: &'a [TermId],
-    terms: &'a [TermElem<Int>],
+    terms: &'a [TermElem<Integer>],
     assignments: &'a [usize],
-    int2name: &'a IdxMap<'cx, Int, Name<'cx>>,
+    int2name: &'a Int2Name<'int, Int>,
     /// Inclusive
     start: usize,
     /// Exclusive
     end: usize,
 }
 
-impl EvalView<'_, '_> {
+impl<Int: Intern> EvalView<'_, '_, Int> {
     const fn len(&self) -> usize {
         self.end - self.start
     }
 }
 
-impl<'a, 'cx> Iterator for EvalView<'a, 'cx> {
-    type Item = Assignment<'a, 'cx>;
+impl<'a, 'int, Int: Intern> Iterator for EvalView<'a, 'int, Int> {
+    type Item = Assignment<'a, 'int, Int>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.start < self.end {
@@ -603,48 +603,48 @@ impl<'a, 'cx> Iterator for EvalView<'a, 'cx> {
     }
 }
 
-impl ExactSizeIterator for EvalView<'_, '_> {
+impl<Int: Intern> ExactSizeIterator for EvalView<'_, '_, Int> {
     fn len(&self) -> usize {
         <Self>::len(self)
     }
 }
 
-impl iter::FusedIterator for EvalView<'_, '_> {}
+impl<Int: Intern> iter::FusedIterator for EvalView<'_, '_, Int> {}
 
-pub struct Assignment<'a, 'cx> {
-    buf: &'a [TermElem<Int>],
+pub struct Assignment<'a, 'int, Int: Intern> {
+    buf: &'a [TermElem<Integer>],
     from: TermId,
     assignments: &'a [usize],
-    int2name: &'a IdxMap<'cx, Int, Name<'cx>>,
+    int2name: &'a Int2Name<'int, Int>,
 }
 
-impl<'a, 'cx> Assignment<'a, 'cx> {
+impl<'a, 'int, Int: Intern> Assignment<'a, 'int, Int> {
     /// Creates left hand side term of the assignment.
     ///
     /// To create a term, this method could allocate memory for the term.
-    pub fn lhs(&self) -> Term<Name<'cx>> {
+    pub fn lhs(&self) -> TermIn<'int, Int> {
         Self::term_view_to_term(self.lhs_view(), self.int2name)
     }
 
     /// Creates right hand side term of the assignment.
     ///
     /// To create a term, this method could allocate memory for the term.
-    pub fn rhs(&self) -> Term<Name<'cx>> {
+    pub fn rhs(&self) -> TermIn<'int, Int> {
         Self::term_deep_view_to_term(self.rhs_view(), self.int2name)
     }
 
     /// Returns left hand side variable name of the assignment.
     ///
     /// Note that assignment's left hand side is always variable.
-    pub fn get_lhs_variable(&self) -> &Name<'cx> {
+    pub fn get_lhs_variable(&self) -> &NameIn<'int, Int> {
         let int = self.lhs_view().get_contained_variable().unwrap();
         self.int2name.get(&int).unwrap()
     }
 
     fn term_view_to_term(
-        view: TermView<'_, Int>,
-        int2name: &IdxMap<'cx, Int, Name<'cx>>,
-    ) -> Term<Name<'cx>> {
+        view: TermView<'_, Integer>,
+        int2name: &Int2Name<'int, Int>,
+    ) -> TermIn<'int, Int> {
         let functor = view.functor();
         let args = view.args();
 
@@ -653,7 +653,7 @@ impl<'a, 'cx> Assignment<'a, 'cx> {
         } else {
             let mut debug_string = String::new();
             write!(&mut debug_string, "{:?}", functor).unwrap();
-            Name::create(int2name.gcx(), &debug_string)
+            Name::with_intern(&debug_string, int2name.interner())
         };
 
         let args = args
@@ -665,9 +665,9 @@ impl<'a, 'cx> Assignment<'a, 'cx> {
     }
 
     fn term_deep_view_to_term(
-        view: TermDeepView<'_, Int>,
-        int2name: &IdxMap<'cx, Int, Name<'cx>>,
-    ) -> Term<Name<'cx>> {
+        view: TermDeepView<'_, Integer>,
+        int2name: &Int2Name<'int, Int>,
+    ) -> TermIn<'int, Int> {
         let functor = view.functor();
         let args = view.args();
 
@@ -676,7 +676,7 @@ impl<'a, 'cx> Assignment<'a, 'cx> {
         } else {
             let mut debug_string = String::new();
             write!(&mut debug_string, "{:?}", functor).unwrap();
-            Name::create(int2name.gcx(), &debug_string)
+            Name::with_intern(&debug_string, int2name.interner())
         };
 
         let args = args
@@ -687,14 +687,14 @@ impl<'a, 'cx> Assignment<'a, 'cx> {
         Term { functor, args }
     }
 
-    const fn lhs_view(&self) -> TermView<'_, Int> {
+    const fn lhs_view(&self) -> TermView<'_, Integer> {
         TermView {
             buf: self.buf,
             id: self.from,
         }
     }
 
-    const fn rhs_view(&self) -> TermDeepView<'_, Int> {
+    const fn rhs_view(&self) -> TermDeepView<'_, Integer> {
         TermDeepView {
             buf: self.buf,
             links: self.assignments,
@@ -703,7 +703,7 @@ impl<'a, 'cx> Assignment<'a, 'cx> {
     }
 }
 
-impl fmt::Display for Assignment<'_, '_> {
+impl<Int: Intern> fmt::Display for Assignment<'_, '_, Int> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let view = format::NamedTermView::new(self.lhs_view(), self.int2name);
         fmt::Display::fmt(&view, f)?;
@@ -715,7 +715,7 @@ impl fmt::Display for Assignment<'_, '_> {
     }
 }
 
-impl fmt::Debug for Assignment<'_, '_> {
+impl<Int: Intern> fmt::Debug for Assignment<'_, '_, Int> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let lhs = format::NamedTermView::new(self.lhs_view(), self.int2name);
         let rhs = format::NamedTermDeepView::new(self.rhs_view(), self.int2name);
@@ -727,8 +727,8 @@ impl fmt::Debug for Assignment<'_, '_> {
     }
 }
 
-impl ExprView<'_, Int> {
-    fn is_unifiable(&self, other: TermView<'_, Int>) -> bool {
+impl ExprView<'_, Integer> {
+    fn is_unifiable(&self, other: TermView<'_, Integer>) -> bool {
         match self.as_kind() {
             ExprKind::Term(term) => term.is_unifiable(other),
             ExprKind::Not(inner) => inner.is_unifiable(other),
@@ -749,7 +749,7 @@ impl ExprView<'_, Int> {
     }
 }
 
-impl TermView<'_, Int> {
+impl TermView<'_, Integer> {
     fn unify<F: FnMut(UnifyOp)>(self, other: Self, f: &mut F) -> bool {
         if self.is_variable() {
             f(UnifyOp::Left {
@@ -809,7 +809,7 @@ impl TermView<'_, Int> {
         self.is_variable() || self.args().any(|arg| arg.contains_variable())
     }
 
-    fn get_contained_variable(&self) -> Option<Int> {
+    fn get_contained_variable(&self) -> Option<Integer> {
         if self.is_variable() {
             Some(*self.functor())
         } else {
@@ -828,20 +828,20 @@ impl TermView<'_, Int> {
     }
 }
 
-impl TermViewMut<'_, Int> {
+impl TermViewMut<'_, Integer> {
     fn is_variable(&self) -> bool {
         self.arity() == 0 && self.functor().is_variable()
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Int(u32);
+pub struct Integer(u32);
 
-impl Int {
+impl Integer {
     const VAR_FLAG: u32 = 0x1 << 31;
     const TEMPORARY_FLAG: u32 = 0x1 << 30;
 
-    pub(crate) fn from_text(s: &Name, mut index: u32) -> Self {
+    pub(crate) fn from_text<T: AsRef<str>>(s: &Name<T>, mut index: u32) -> Self {
         if s.is_variable() {
             index |= Self::VAR_FLAG;
         }
@@ -862,7 +862,7 @@ impl Int {
     }
 }
 
-impl fmt::Debug for Int {
+impl Debug for Integer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mask: u32 = Self::VAR_FLAG | Self::TEMPORARY_FLAG;
         let index = !mask & self.0;
@@ -877,7 +877,7 @@ impl fmt::Debug for Int {
     }
 }
 
-impl ops::AddAssign<u32> for Int {
+impl ops::AddAssign<u32> for Integer {
     fn add_assign(&mut self, rhs: u32) {
         self.0 += rhs;
     }
@@ -886,26 +886,26 @@ impl ops::AddAssign<u32> for Int {
 /// Only mapping of user-input clauses and queries are stored in this map.
 /// Auto-generated variables or something like that are not stored here.
 #[derive(Debug)]
-pub(crate) struct NameIntMap<'cx> {
-    pub(crate) name2int: IdxMap<'cx, Name<'cx>, Int>,
-    pub(crate) int2name: IdxMap<'cx, Int, Name<'cx>>,
+pub(crate) struct NameIntMap<'int, Int: Intern> {
+    pub(crate) name2int: Name2Int<'int, Int>,
+    pub(crate) int2name: Int2Name<'int, Int>,
     next_int: u32,
 }
 
-impl<'cx> NameIntMap<'cx> {
-    pub(crate) fn new(gcx: GlobalCx<'cx>) -> Self {
+impl<'int, Int: Intern> NameIntMap<'int, Int> {
+    pub(crate) fn new(interner: &'int Int) -> Self {
         Self {
-            name2int: IdxMap::new(gcx),
-            int2name: IdxMap::new(gcx),
+            name2int: IdxMap::new(interner),
+            int2name: IdxMap::new(interner),
             next_int: 0,
         }
     }
 
-    pub(crate) fn name_to_int(&mut self, name: Name<'cx>) -> Int {
+    pub(crate) fn name_to_int(&mut self, name: NameIn<'int, Int>) -> Integer {
         if let Some(int) = self.name2int.get(&name) {
             *int
         } else {
-            let int = Int::from_text(&name, self.next_int);
+            let int = Integer::from_text(&name, self.next_int);
 
             self.name2int.insert(name.clone(), int);
             self.int2name.insert(int, name);
@@ -938,21 +938,21 @@ impl<'cx> NameIntMap<'cx> {
 }
 
 #[derive(Debug)]
-pub(crate) struct IdxMap<'cx, K, V> {
+pub(crate) struct IdxMap<'int, K, V, Int> {
     map: IndexMap<K, V>,
-    pub(crate) gcx: GlobalCx<'cx>,
+    pub(crate) interner: &'int Int,
 }
 
-impl<'cx, K, V> IdxMap<'cx, K, V> {
-    pub(crate) fn new(gcx: GlobalCx<'cx>) -> Self {
+impl<'int, K, V, Int> IdxMap<'int, K, V, Int> {
+    pub(crate) fn new(interner: &'int Int) -> Self {
         Self {
             map: IndexMap::default(),
-            gcx,
+            interner,
         }
     }
 
-    pub(crate) fn gcx(&self) -> &GlobalCx<'cx> {
-        &self.gcx
+    pub(crate) fn interner(&self) -> &'int Int {
+        self.interner
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -989,20 +989,20 @@ pub(crate) struct NameIntMapState {
 pub(crate) mod format {
     use super::*;
 
-    pub struct NamedTermView<'a, 'cx> {
-        view: TermView<'a, Int>,
-        int2name: &'a IdxMap<'cx, Int, Name<'cx>>,
+    pub struct NamedTermView<'a, 'int, Int: Intern> {
+        view: TermView<'a, Integer>,
+        int2name: &'a Int2Name<'int, Int>,
     }
 
-    impl<'a, 'cx> NamedTermView<'a, 'cx> {
+    impl<'a, 'int, Int: Intern> NamedTermView<'a, 'int, Int> {
         pub(crate) const fn new(
-            view: TermView<'a, Int>,
-            int2name: &'a IdxMap<'cx, Int, Name<'cx>>,
+            view: TermView<'a, Integer>,
+            int2name: &'a Int2Name<'int, Int>,
         ) -> Self {
             Self { view, int2name }
         }
 
-        pub fn is(&self, term: &Term<Name<'cx>>) -> bool {
+        pub fn is(&self, term: &TermIn<'int, Int>) -> bool {
             let functor = self.view.functor();
             let Some(functor) = self.int2name.get(functor) else {
                 return false;
@@ -1015,7 +1015,7 @@ pub(crate) mod format {
             self.args().zip(&term.args).all(|(l, r)| l.is(r))
         }
 
-        pub fn contains(&self, term: &Term<Name<'cx>>) -> bool {
+        pub fn contains(&self, term: &TermIn<'int, Int>) -> bool {
             if self.is(term) {
                 return true;
             }
@@ -1031,7 +1031,7 @@ pub(crate) mod format {
         }
     }
 
-    impl fmt::Display for NamedTermView<'_, '_> {
+    impl<'a, 'int, Int: Intern> fmt::Display for NamedTermView<'a, 'int, Int> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             let Self { view, int2name } = self;
 
@@ -1055,7 +1055,7 @@ pub(crate) mod format {
         }
     }
 
-    impl fmt::Debug for NamedTermView<'_, '_> {
+    impl<'a, 'int, Int: Intern> fmt::Debug for NamedTermView<'a, 'int, Int> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             let Self { view, int2name } = self;
 
@@ -1067,7 +1067,7 @@ pub(crate) mod format {
                 write_int(functor, int2name, f)
             } else {
                 let mut d = if let Some(name) = int2name.get(functor) {
-                    f.debug_tuple(name)
+                    f.debug_tuple(name.as_ref())
                 } else {
                     let mut debug_string = String::new();
                     write!(&mut debug_string, "{:?}", functor)?;
@@ -1082,21 +1082,21 @@ pub(crate) mod format {
         }
     }
 
-    pub(crate) struct NamedTermDeepView<'a, 'cx> {
-        view: TermDeepView<'a, Int>,
-        int2name: &'a IdxMap<'cx, Int, Name<'cx>>,
+    pub(crate) struct NamedTermDeepView<'a, 'int, Int: Intern> {
+        view: TermDeepView<'a, Integer>,
+        int2name: &'a Int2Name<'int, Int>,
     }
 
-    impl<'a, 'cx> NamedTermDeepView<'a, 'cx> {
+    impl<'a, 'int, Int: Intern> NamedTermDeepView<'a, 'int, Int> {
         pub(crate) const fn new(
-            view: TermDeepView<'a, Int>,
-            int2name: &'a IdxMap<'cx, Int, Name<'cx>>,
+            view: TermDeepView<'a, Integer>,
+            int2name: &'a Int2Name<'int, Int>,
         ) -> Self {
             Self { view, int2name }
         }
     }
 
-    impl fmt::Display for NamedTermDeepView<'_, '_> {
+    impl<'a, 'int, Int: Intern> fmt::Display for NamedTermDeepView<'a, 'int, Int> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             let Self { view, int2name } = self;
 
@@ -1120,7 +1120,7 @@ pub(crate) mod format {
         }
     }
 
-    impl fmt::Debug for NamedTermDeepView<'_, '_> {
+    impl<'a, 'int, Int: Intern> fmt::Debug for NamedTermDeepView<'a, 'int, Int> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             let Self { view, int2name } = self;
 
@@ -1132,7 +1132,7 @@ pub(crate) mod format {
                 write_int(functor, int2name, f)
             } else {
                 let mut d = if let Some(name) = int2name.get(functor) {
-                    f.debug_tuple(name)
+                    f.debug_tuple(name.as_ref())
                 } else {
                     let mut debug_string = String::new();
                     write!(&mut debug_string, "{:?}", functor)?;
@@ -1147,20 +1147,20 @@ pub(crate) mod format {
         }
     }
 
-    pub struct NamedExprView<'a, 'cx> {
-        view: ExprView<'a, Int>,
-        int2name: &'a IdxMap<'cx, Int, Name<'cx>>,
+    pub struct NamedExprView<'a, 'int, Int: Intern> {
+        view: ExprView<'a, Integer>,
+        int2name: &'a Int2Name<'int, Int>,
     }
 
-    impl<'a, 'cx> NamedExprView<'a, 'cx> {
+    impl<'a, 'int, Int: Intern> NamedExprView<'a, 'int, Int> {
         pub(crate) const fn new(
-            view: ExprView<'a, Int>,
-            int2name: &'a IdxMap<'cx, Int, Name<'cx>>,
+            view: ExprView<'a, Integer>,
+            int2name: &'a Int2Name<'int, Int>,
         ) -> Self {
             Self { view, int2name }
         }
 
-        pub fn contains_term(&self, term: &Term<Name<'cx>>) -> bool {
+        pub fn contains_term(&self, term: &TermIn<'int, Int>) -> bool {
             match self.view.as_kind() {
                 ExprKind::Term(view) => NamedTermView {
                     view,
@@ -1183,7 +1183,7 @@ pub(crate) mod format {
         }
     }
 
-    impl fmt::Display for NamedExprView<'_, '_> {
+    impl<'a, 'int, Int: Intern> fmt::Display for NamedExprView<'a, 'int, Int> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             let Self { view, int2name } = self;
 
@@ -1234,7 +1234,7 @@ pub(crate) mod format {
         }
     }
 
-    impl fmt::Debug for NamedExprView<'_, '_> {
+    impl<'a, 'int, Int: Intern> fmt::Debug for NamedExprView<'a, 'int, Int> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             let Self { view, int2name } = self;
 
@@ -1262,13 +1262,13 @@ pub(crate) mod format {
         }
     }
 
-    fn write_int(
-        int: &Int,
-        map: &IdxMap<'_, Int, Name<'_>>,
+    fn write_int<'int, Int: Intern>(
+        int: &Integer,
+        map: &Int2Name<'int, Int>,
         f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         if let Some(name) = map.get(int) {
-            f.write_str(name)
+            f.write_str(name.as_ref())
         } else {
             fmt::Debug::fmt(int, f)
         }

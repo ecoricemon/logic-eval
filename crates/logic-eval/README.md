@@ -16,12 +16,12 @@ let dataset = "
     descend($X, $Y) :- child($X, $Y).
     descend($X, $Z) :- child($X, $Y), descend($Y, $Z).
 ";
-db.insert_dataset(parse_str(db.gcx(), dataset).unwrap());
+db.insert_dataset(parse_str(dataset, &interner).unwrap());
 db.commit();
 
 // Queries the DB.
 let query = "descend($X, $Y).";
-let mut cx = db.query(parse_str(db.gcx(), query).unwrap());
+let mut cx = db.query(parse_str(query, &interner).unwrap());
 
 let mut answer = Vec::new();
 while let Some(eval) = cx.prove_next() {

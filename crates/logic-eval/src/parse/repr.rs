@@ -1,6 +1,6 @@
 use super::text::Name;
 use std::{
-    fmt::{self, Write},
+    fmt::{self, Debug, Display, Write},
     ops,
     vec::IntoIter,
 };
@@ -50,7 +50,7 @@ impl<T> Clause<T> {
     }
 }
 
-impl<T: fmt::Display> fmt::Display for Clause<T> {
+impl<T: AsRef<str>> Display for Clause<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.head.fmt(f)?;
         if let Some(body) = &self.body {
@@ -101,7 +101,7 @@ impl<T: Clone> Term<T> {
     }
 }
 
-impl Term<Name<'_>> {
+impl<T: AsRef<str>> Term<Name<T>> {
     pub fn is_variable(&self) -> bool {
         let is_variable = self.functor.is_variable();
 
@@ -122,9 +122,10 @@ impl Term<Name<'_>> {
     }
 }
 
-impl<T: fmt::Display> fmt::Display for Term<T> {
+impl<T: AsRef<str>> Display for Term<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.functor.fmt(f)?;
+        let functor: &str = self.functor.as_ref();
+        f.write_str(functor)?;
         if !self.args.is_empty() {
             f.write_char('(')?;
             for (i, arg) in self.args.iter().enumerate() {
@@ -139,12 +140,13 @@ impl<T: fmt::Display> fmt::Display for Term<T> {
     }
 }
 
-impl fmt::Debug for Term<Name<'_>> {
+impl<T: AsRef<str>> Debug for Term<Name<T>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let functor: &str = self.functor.as_ref();
         if self.args.is_empty() {
-            self.functor.fmt(f)
+            f.write_str(functor)
         } else {
-            let mut d = f.debug_tuple(&self.functor);
+            let mut d = f.debug_tuple(functor);
             for arg in &self.args {
                 d.field(&arg);
             }
@@ -189,7 +191,7 @@ impl<T> Expr<T> {
     }
 }
 
-impl<T: fmt::Display> fmt::Display for Expr<T> {
+impl<T: AsRef<str>> Display for Expr<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Term(term) => term.fmt(f)?,
@@ -230,7 +232,7 @@ impl<T: fmt::Display> fmt::Display for Expr<T> {
     }
 }
 
-impl fmt::Debug for Expr<Name<'_>> {
+impl<T: AsRef<str>> Debug for Expr<Name<T>> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Term(term) => fmt::Debug::fmt(term, f),

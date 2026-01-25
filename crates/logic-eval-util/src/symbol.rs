@@ -1,5 +1,6 @@
 use crate::Map;
 use any_intern::Interned;
+use std::{borrow::Borrow, hash::Hash};
 
 #[derive(Debug)]
 pub struct SymbolTable<'int, T> {
@@ -49,17 +50,25 @@ impl<'int, T> SymbolTable<'int, T> {
         self.map.retain(|_, v| !v.is_empty());
     }
 
-    pub fn get(&self, name: Interned<'int, str>) -> Option<&T> {
-        self.map.get(&name)?.iter().rev().find_map(|x| match x {
+    pub fn get<Q>(&self, name: &Q) -> Option<&T>
+    where
+        Interned<'int, str>: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.map.get(name)?.iter().rev().find_map(|x| match x {
             Symbol::Data(v) => Some(Some(v)),
             Symbol::Transparent => None,  // Continue the iteration.
             Symbol::Opaque => Some(None), // Stop the iteration.
         })?
     }
 
-    pub fn get_mut(&mut self, name: Interned<'int, str>) -> Option<&mut T> {
+    pub fn get_mut<Q>(&mut self, name: &Q) -> Option<&mut T>
+    where
+        Interned<'int, str>: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.map
-            .get_mut(&name)?
+            .get_mut(name)?
             .iter_mut()
             .rev()
             .find_map(|x| match x {

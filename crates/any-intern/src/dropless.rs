@@ -3,7 +3,9 @@ use bumpalo::Bump;
 use hashbrown::{HashTable, hash_table::Entry};
 use std::{
     alloc::Layout,
+    fmt::{self, Display, Write},
     hash::{BuildHasher, Hash},
+    mem::MaybeUninit,
     ptr::{self, NonNull},
     slice,
 };
@@ -269,6 +271,40 @@ impl<S: BuildHasher> DroplessInterner<S> {
         self.with_inner(|set| set.intern(value))
     }
 
+    /// Stores a value in the interner as a formatted string through [`Display`], returning a
+    /// reference to the interned value.
+    ///
+    /// This method provides a buffer for making string. This will be benefit in terms of
+    /// performance when you frequently make `String` via something like `to_string()` by exploiting
+    /// chunk memory.
+    ///
+    /// This method first formats the given value using the `Display` trait and stores the resulting
+    /// string in the interner's buffer, then compares the string with existing values. If the
+    /// formatted string already exists in the interner, formatted string is discarded and reference
+    /// to the existing value is returned.
+    ///
+    /// If you give insufficient `upper_size`, then error is returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::DroplessInterner;
+    ///
+    /// let interner = DroplessInterner::new();
+    ///
+    /// let value = 42;
+    /// let interned = interner.intern_formatted_str(&value, 10).unwrap();
+    ///
+    /// assert_eq!(&*interned, "42");
+    /// ```
+    pub fn intern_formatted_str<K: Display + ?Sized>(
+        &self,
+        value: &K,
+        upper_size: usize,
+    ) -> Result<Interned<'_, str>, fmt::Error> {
+        self.with_inner(|set| set.intern_formatted_str(value, upper_size))
+    }
+
     /// Retrieves a reference to a value in the interner based on the provided key.
     ///
     /// This method checks if a value corresponding to the given key exists in the interner. If it
@@ -284,7 +320,7 @@ impl<S: BuildHasher> DroplessInterner<S> {
     /// // Interning strings
     /// let hello = interner.intern("hello");
     ///
-    /// assert_eq!(*interner.get("hello").unwrap(), "hello");
+    /// assert_eq!(interner.get("hello").as_deref(), Some("hello"));
     /// assert!(interner.get("world").is_none());
     /// ```
     pub fn get<K: Dropless + ?Sized>(&self, value: &K) -> Option<Interned<'_, K>> {
@@ -325,9 +361,10 @@ impl<S: Default> Default for DroplessInterner<S> {
 /// A dropless interner.
 ///
 /// Interning on this type always copies the given value into internal buffer.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct DroplessInternSet<S = fxhash::FxBuildHasher> {
     bump: Bump,
+    str_buf: StringBuffer,
     set: HashTable<DynInternEntry<S>>,
     hash_builder: S,
 }
@@ -342,6 +379,7 @@ impl<S: BuildHasher> DroplessInternSet<S> {
     pub fn with_hasher(hash_builder: S) -> Self {
         Self {
             bump: Bump::new(),
+            str_buf: StringBuffer::default(),
             set: HashTable::new(),
             hash_builder,
         }
@@ -350,10 +388,19 @@ impl<S: BuildHasher> DroplessInternSet<S> {
     pub fn intern<K: Dropless + ?Sized>(&mut self, value: &K) -> Interned<'_, K> {
         let src = value.as_byte_ptr();
         let layout = value.layout();
+
         unsafe {
+            // Allocation for zero sized data should be avoided even if Bump allocator allows it.
+            // Plus, we change its address to make it static for equality test.
+            if layout.size() == 0 {
+                let ptr = value as *const K;
+                let ptr = ptr.with_addr(layout.align()); // Like ptr::dangling()
+                return Interned::unique(&*ptr);
+            }
+
             let bytes = slice::from_raw_parts(src.as_ptr(), layout.size());
             let hash = <K as Dropless>::hash(&self.hash_builder, bytes);
-            let eq = Self::table_eq::<K>(bytes, layout.align());
+            let eq = Self::table_eq::<K>(bytes, layout);
             let hasher = Self::table_hasher(&self.hash_builder);
             let ref_ = match self.set.entry(hash, eq, hasher) {
                 Entry::Occupied(entry) => Self::ref_from_entry(entry.get()),
@@ -362,15 +409,73 @@ impl<S: BuildHasher> DroplessInternSet<S> {
                     let dst = self.bump.alloc_layout(layout);
                     ptr::copy_nonoverlapping(src.as_ptr(), dst.as_ptr(), layout.size());
 
+                    // New set entry
                     let occupied = entry.insert(DynInternEntry {
                         data: RawInterned(dst).cast(),
                         layout,
                         hash: <K as Dropless>::hash,
                     });
+
                     Self::ref_from_entry(occupied.get())
                 }
             };
             Interned::unique(ref_)
+        }
+    }
+
+    pub fn intern_formatted_str<K: Display + ?Sized>(
+        &mut self,
+        value: &K,
+        upper_size: usize,
+    ) -> Result<Interned<'_, str>, fmt::Error> {
+        let mut write_buf = self.str_buf.speculative_alloc(upper_size);
+        write!(write_buf, "{value}")?;
+        let bytes = write_buf.as_bytes();
+
+        unsafe {
+            // Safety
+            // We wrote it down to the buffer through Display trait, so it is definitely UTF-8.
+            // ref: https://doc.rust-lang.org/std/fmt/index.html#fmtdisplay-vs-fmtdebug
+            let value = str::from_utf8_unchecked(bytes);
+            let layout = Layout::from_size_align_unchecked(bytes.len(), 1);
+
+            // We change address to make it static for equality test.
+            if bytes.is_empty() {
+                let ptr = value as *const str;
+                let ptr = ptr.with_addr(layout.align()); // Like ptr::dangling()
+                return Ok(Interned::unique(&*ptr));
+            }
+
+            let hash = <str as Dropless>::hash(&self.hash_builder, bytes);
+            let eq = Self::table_eq::<str>(bytes, layout);
+            let hasher = Self::table_hasher(&self.hash_builder);
+            let ref_ = match self.set.entry(hash, eq, hasher) {
+                Entry::Occupied(entry) => {
+                    // Discards the change to the string buffer by just dropping the `write_buf`
+                    // because we have the same value in the bump alloator.
+                    // drop(write_buf);
+
+                    Self::ref_from_entry(entry.get())
+                }
+                Entry::Vacant(entry) => {
+                    // Safety: Zero size was filtered out above.
+                    let ptr = NonNull::new_unchecked(bytes.as_ptr().cast_mut());
+
+                    // We keep the change to the string buffer because we're going to return the
+                    // reference to the string buffer.
+                    write_buf.commit();
+
+                    // New set entry
+                    let occupied = entry.insert(DynInternEntry {
+                        data: RawInterned(ptr).cast(),
+                        layout,
+                        hash: <str as Dropless>::hash,
+                    });
+
+                    Self::ref_from_entry(occupied.get())
+                }
+            };
+            Ok(Interned::unique(ref_))
         }
     }
 
@@ -383,7 +488,7 @@ impl<S: BuildHasher> DroplessInternSet<S> {
     /// let mut set = DroplessInternSet::with_hasher(RandomState::new());
     /// set.intern("hello");
     ///
-    /// assert_eq!(set.get("hello").as_deref(), Some(&"hello"));
+    /// assert_eq!(set.get("hello").as_deref(), Some("hello"));
     /// assert!(set.get("hi").is_none());
     /// ```
     pub fn get<K: Dropless + ?Sized>(&self, value: &K) -> Option<Interned<'_, K>> {
@@ -392,7 +497,7 @@ impl<S: BuildHasher> DroplessInternSet<S> {
         unsafe {
             let bytes = slice::from_raw_parts(ptr.as_ptr(), layout.size());
             let hash = <K as Dropless>::hash(&self.hash_builder, bytes);
-            let eq = Self::table_eq::<K>(bytes, layout.align());
+            let eq = Self::table_eq::<K>(bytes, layout);
             let entry = self.set.find(hash, eq)?;
             let ref_ = Self::ref_from_entry(entry);
             Some(Interned::unique(ref_))
@@ -413,12 +518,13 @@ impl<S: BuildHasher> DroplessInternSet<S> {
     }
 
     /// Returns `eq` closure that is used for some methods on the [`HashTable`].
+    #[inline]
     fn table_eq<K: Dropless + ?Sized>(
         key: &[u8],
-        align: usize,
+        layout: Layout,
     ) -> impl FnMut(&DynInternEntry<S>) -> bool {
         move |entry: &DynInternEntry<S>| unsafe {
-            if align == entry.layout.align() {
+            if layout == entry.layout {
                 let entry_bytes =
                     slice::from_raw_parts(entry.data.cast::<u8>().as_ptr(), entry.layout.size());
                 <K as Dropless>::eq(key, entry_bytes)
@@ -429,6 +535,7 @@ impl<S: BuildHasher> DroplessInternSet<S> {
     }
 
     /// Returns `hasher` closure that is used for some methods on the [`HashTable`].
+    #[inline]
     fn table_hasher(hash_builder: &S) -> impl Fn(&DynInternEntry<S>) -> u64 {
         |entry: &DynInternEntry<S>| unsafe {
             let entry_bytes =
@@ -438,6 +545,7 @@ impl<S: BuildHasher> DroplessInternSet<S> {
         }
     }
 
+    #[inline]
     unsafe fn ref_from_entry<'a, K: Dropless + ?Sized>(entry: &DynInternEntry<S>) -> &'a K {
         unsafe {
             let bytes =
@@ -447,12 +555,94 @@ impl<S: BuildHasher> DroplessInternSet<S> {
     }
 }
 
-impl<S: Default> Default for DroplessInternSet<S> {
-    fn default() -> Self {
-        Self {
-            bump: Bump::new(),
-            set: HashTable::new(),
-            hash_builder: Default::default(),
+/// A buffer for strings.
+#[derive(Debug, Default)]
+struct StringBuffer {
+    chunks: Vec<Box<[MaybeUninit<u8>]>>,
+    last_chunk_start: usize,
+}
+
+const INIT_CHUNK_SIZE: usize = 1 << 5;
+const GLOW_MAX_CHUNK_SIZE: usize = 1 << 12;
+
+impl StringBuffer {
+    fn speculative_alloc(&mut self, upper_size: usize) -> StringWriteBuffer<'_> {
+        match self.chunks.last() {
+            None => {
+                let chunk_size = INIT_CHUNK_SIZE.max(upper_size.next_power_of_two());
+                self.append_new_chunk(chunk_size)
+            }
+            Some(last_chunk) if last_chunk.len() - self.last_chunk_start < upper_size => {
+                let chunk_size = (last_chunk.len() * 2)
+                    .min(GLOW_MAX_CHUNK_SIZE)
+                    .max(upper_size.next_power_of_two());
+                self.append_new_chunk(chunk_size);
+            }
+            _ => {}
+        }
+
+        // Safety: We added the last chunk above.
+        let last_chunk = unsafe { self.chunks.last_mut().unwrap_unchecked() };
+
+        let start = self.last_chunk_start;
+        let end = self.last_chunk_start + upper_size;
+        let buf = &mut last_chunk[start..end];
+        StringWriteBuffer {
+            buf,
+            last_chuck_start: &mut self.last_chunk_start,
+            written: 0,
+        }
+    }
+
+    #[inline]
+    fn append_new_chunk(&mut self, chunk_size: usize) {
+        let chunk = Box::new_uninit_slice(chunk_size);
+        self.chunks.push(chunk);
+        self.last_chunk_start = 0;
+    }
+}
+
+struct StringWriteBuffer<'a> {
+    buf: &'a mut [MaybeUninit<u8>],
+    last_chuck_start: &'a mut usize,
+    written: usize,
+}
+
+impl<'a> StringWriteBuffer<'a> {
+    #[inline]
+    fn as_bytes(&self) -> &[u8] {
+        let ptr = self.buf.as_ptr().cast::<u8>();
+        unsafe { slice::from_raw_parts(ptr, self.written) }
+    }
+
+    #[inline]
+    fn commit(self) {
+        *self.last_chuck_start += self.written;
+    }
+}
+
+impl Write for StringWriteBuffer<'_> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let size = s.len();
+
+        if self.buf.len() - self.written >= size {
+            let src = s.as_ptr();
+
+            // Safety: `written` cannot be over the buf size by the if condition
+            let buf = unsafe { self.buf.get_unchecked_mut(self.written..) };
+            let dst = buf.as_mut_ptr().cast::<u8>();
+
+            // Safety
+            // * `src` is valid for reading of `size` bytes
+            // * `dst` is valid for reading of `size` bytes
+            // * Two pointers are well aligned. Both alignments are 1
+            // * `src` and `dst` are not overlapping
+            unsafe { ptr::copy_nonoverlapping(src, dst, size) };
+
+            self.written += size;
+            Ok(())
+        } else {
+            Err(std::fmt::Error)
         }
     }
 }
@@ -469,6 +659,7 @@ struct DynInternEntry<S> {
 mod tests {
     use super::*;
     use crate::common;
+    use std::num::NonZeroU32;
 
     #[test]
     fn test_dropless_interner() {
@@ -478,6 +669,7 @@ mod tests {
         test_dropless_interner_mixed();
         test_dropless_interner_many();
         test_dropless_interner_alignment_handling();
+        test_dropless_interner_complex_display_type();
     }
 
     fn test_dropless_interner_int() {
@@ -496,12 +688,30 @@ mod tests {
     fn test_dropless_interner_str() {
         let interner = DroplessInterner::new();
 
+        // "apple"
         let a = interner.intern("apple").erased_raw();
         let b = interner.intern(*Box::new("apple")).erased_raw();
         let c = interner.intern(&*String::from("apple")).erased_raw();
+
+        // "banana"
         let d = interner.intern("banana").erased_raw();
 
-        let groups: [&[RawInterned]; _] = [&[a, b, c], &[d]];
+        // ""
+        let e = interner.intern("").erased_raw();
+        let f = interner.intern(&*String::from("")).erased_raw();
+
+        // "42"
+        let g = interner.intern("42").erased_raw();
+        let h = interner.intern_formatted_str(&42, 2).unwrap().erased_raw();
+
+        // "43"
+        let i = interner
+            .intern_formatted_str(&NonZeroU32::new(43).unwrap(), 2)
+            .unwrap()
+            .erased_raw();
+        let j = interner.intern(&*43.to_string()).erased_raw();
+
+        let groups: [&[RawInterned]; _] = [&[a, b, c], &[d], &[e, f], &[g, h], &[i, j]];
         common::assert_group_addr_eq(&groups);
     }
 
@@ -521,15 +731,21 @@ mod tests {
     fn test_dropless_interner_mixed() {
         let interner = DroplessInterner::new();
 
+        interner.intern("apple");
         interner.intern(&1_u32);
         interner.intern(&[2, 3]);
-        interner.intern("apple");
-        assert_eq!(interner.get("apple").as_deref(), Some(&"apple"));
+        interner.intern_formatted_str(&42, 10).unwrap();
+
+        assert_eq!(interner.get("apple").as_deref(), Some("apple"));
         assert!(interner.get("banana").is_none());
-        assert_eq!(interner.get(&1_u32).as_deref(), Some(&&1_u32));
+
+        assert_eq!(interner.get(&1_u32).as_deref(), Some(&1_u32));
         assert!(interner.get(&2_u32).is_none());
-        assert_eq!(interner.get(&[2, 3]).as_deref(), Some(&&[2, 3]));
+
+        assert_eq!(interner.get(&[2, 3]).as_deref(), Some(&[2, 3]));
         assert!(interner.get(&[2]).is_none());
+
+        assert_eq!(interner.get("42").as_deref(), Some("42"));
     }
 
     fn test_dropless_interner_many() {
@@ -576,9 +792,9 @@ mod tests {
             let int = &(i as u32); // 4 bytes
             let str_ = &*strs[i]; // greater than 4 btyes
             let bytes = &[i as u16]; // 2 bytes
-            assert_eq!(*interner.get(int).unwrap(), int);
-            assert_eq!(*interner.get(str_).unwrap(), str_);
-            assert_eq!(*interner.get(bytes).unwrap(), bytes);
+            assert_eq!(interner.get(int).as_deref(), Some(int));
+            assert_eq!(interner.get(str_).as_deref(), Some(str_));
+            assert_eq!(interner.get(bytes).as_deref(), Some(bytes));
         }
     }
 
@@ -629,10 +845,126 @@ mod tests {
             let t8 = T8(i as u16, [8; _]);
             let t16 = T16(i as u16, [16; _]);
             unsafe {
-                assert_eq!(*<Interned<'_, T4>>::from_erased_raw(interned_4[i]), &t4);
-                assert_eq!(*<Interned<'_, T8>>::from_erased_raw(interned_8[i]), &t8);
-                assert_eq!(*<Interned<'_, T16>>::from_erased_raw(interned_16[i]), &t16);
+                assert_eq!(*<Interned<'_, T4>>::from_erased_raw(interned_4[i]), t4);
+                assert_eq!(*<Interned<'_, T8>>::from_erased_raw(interned_8[i]), t8);
+                assert_eq!(*<Interned<'_, T16>>::from_erased_raw(interned_16[i]), t16);
             }
         }
+    }
+
+    fn test_dropless_interner_complex_display_type() {
+        let interner = DroplessInterner::new();
+
+        #[allow(unused)]
+        #[derive(Debug)]
+        struct A<'a> {
+            int: i32,
+            float: f32,
+            text: &'a str,
+            bytes: &'a [u8],
+        }
+
+        impl Display for A<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                fmt::Debug::fmt(self, f)
+            }
+        }
+
+        let a = A {
+            int: 123,
+            float: 456.789,
+            text: "this is a text",
+            bytes: &[1, 2, 3, 4, 5, 6, 7, 8, 9, 0],
+        };
+
+        let interned = interner.intern_formatted_str(&a, 1_000).unwrap();
+
+        let mut s = String::new();
+        write!(&mut s, "{a}").unwrap();
+        assert_eq!(&*interned, s.as_str());
+    }
+
+    #[test]
+    fn test_string_buffer() {
+        test_string_buffer_chunk();
+        test_string_buffer_discard();
+        test_string_buffer_insufficient_upper_size();
+        test_string_buffer_long_string();
+    }
+
+    fn test_string_buffer_chunk() {
+        let mut buf = StringBuffer::default();
+        assert_eq!(buf.chunks.len(), 0);
+
+        // Fills the first chunk.
+        let s = "a".repeat(INIT_CHUNK_SIZE);
+        let mut write_buf = buf.speculative_alloc(s.len());
+        write_buf.write_str(&s).unwrap();
+        assert_eq!(write_buf.as_bytes(), s.as_bytes());
+        write_buf.commit();
+
+        assert_eq!(buf.chunks.len(), 1);
+        assert_eq!(buf.last_chunk_start, s.len());
+
+        // Makes another chunk.
+        let mut write_buf = buf.speculative_alloc(1);
+        write_buf.write_str("a").unwrap();
+        assert_eq!(write_buf.as_bytes(), b"a");
+        write_buf.commit();
+
+        assert_eq!(buf.chunks.len(), 2);
+        assert_eq!(buf.last_chunk_start, 1);
+
+        // Forces to make another chunk
+        let mut write_buf = buf.speculative_alloc(GLOW_MAX_CHUNK_SIZE);
+        write_buf.write_str("aa").unwrap();
+        assert_eq!(write_buf.as_bytes(), b"aa");
+        write_buf.commit();
+
+        assert_eq!(buf.chunks.len(), 3);
+        assert_eq!(buf.last_chunk_start, 2);
+    }
+
+    fn test_string_buffer_discard() {
+        let mut buf = StringBuffer::default();
+
+        // Write & discard makes no change.
+        for _ in 0..10 {
+            let s = "a".repeat(INIT_CHUNK_SIZE);
+            let mut write_buf = buf.speculative_alloc(s.len());
+            write_buf.write_str(&s).unwrap();
+            assert_eq!(write_buf.as_bytes(), s.as_bytes());
+            drop(write_buf);
+
+            assert_eq!(buf.chunks.len(), 1);
+            assert_eq!(buf.last_chunk_start, 0);
+        }
+    }
+
+    fn test_string_buffer_insufficient_upper_size() {
+        let mut buf = StringBuffer::default();
+
+        for _ in 0..10 {
+            let mut write_buf = buf.speculative_alloc(5);
+            let res = write_buf.write_str("this is longer than 5");
+            assert!(res.is_err());
+            write_buf.commit();
+
+            assert_eq!(buf.chunks.len(), 1);
+            assert_eq!(buf.last_chunk_start, 0);
+        }
+    }
+
+    fn test_string_buffer_long_string() {
+        let mut buf = StringBuffer::default();
+
+        let s = "a".repeat(GLOW_MAX_CHUNK_SIZE * 10);
+        let mut write_buf = buf.speculative_alloc(s.len());
+        write_buf.write_str(&s).unwrap();
+        assert_eq!(write_buf.as_bytes(), s.as_bytes());
+        write_buf.commit();
+
+        assert_eq!(buf.chunks.len(), 1);
+        assert_eq!(buf.last_chunk_start, s.len());
     }
 }

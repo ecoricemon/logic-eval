@@ -1,9 +1,9 @@
 [package]
 name = "any-intern"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.89"
-description = "A simple interner"
+description = "An interner for various types"
 readme = "README.md"
 repository = "https://github.com/ecoricemon/logic-eval"
 license = "Apache-2.0 OR MIT"
@@ -19,6 +19,9 @@ hashbrown = { workspace = true }
 parking_lot = { workspace = true }
 paste = { workspace = true }
 
+[dev-dependencies]
+criterion = { workspace = true }
+
 # Test with sanitizer
 [[example]]
 name = "asan"
@@ -29,3 +32,7 @@ crate-type = ["bin"]
 name = "tsan"
 path = "tests-san/tsan.rs"
 crate-type = ["bin"]
+
+[[bench]]
+name = "bench"
+harness = false

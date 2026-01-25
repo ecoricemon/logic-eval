@@ -133,15 +133,15 @@ impl<S: BuildHasher> AnyInterner<S> {
     /// unsafe {
     ///     let a = interner.intern_with(&42, || A(42));
     ///     assert_eq!(interner.len(), 1);
-    ///     assert_eq!(*a, &A(42));
+    ///     assert_eq!(*a, A(42));
     ///
     ///     let b = interner.intern_with(&42, || A(99)); // Closure is not called
     ///     assert_eq!(interner.len(), 1);
-    ///     assert_eq!(*b, &A(42));
+    ///     assert_eq!(*b, A(42));
     ///
     ///     let c = interner.intern_with(&43, || A(43));
     ///     assert_eq!(interner.len(), 2);
-    ///     assert_eq!(*c, &A(43));
+    ///     assert_eq!(*c, A(43));
     /// }
     /// ```
     ///
@@ -170,7 +170,7 @@ impl<S: BuildHasher> AnyInterner<S> {
     /// let interner = AnyInterner::of::<i32>();
     /// unsafe {
     ///     interner.intern(42);
-    ///     assert_eq!(*interner.get::<i32, _>(&42).unwrap(), &42);
+    ///     assert_eq!(interner.get::<i32, _>(&42).as_deref(), Some(&42));
     ///     assert!(interner.get::<i32, _>(&99).is_none());
     /// }
     /// ```
@@ -364,15 +364,15 @@ impl<S: BuildHasher> AnyInternSet<S> {
     ///
     /// unsafe {
     ///     let a = set.intern_with(&42, || A(42));
-    ///     assert_eq!(*a, &A(42));
+    ///     assert_eq!(*a, A(42));
     ///     assert_eq!(set.len(), 1);
     ///
     ///     let b = set.intern_with(&42, || A(99)); // Closure is not called
-    ///     assert_eq!(*b, &A(42));
+    ///     assert_eq!(*b, A(42));
     ///     assert_eq!(set.len(), 1);
     ///
     ///     let c = set.intern_with(&43, || A(43));
-    ///     assert_eq!(*c, &A(43));
+    ///     assert_eq!(*c, A(43));
     ///     assert_eq!(set.len(), 2);
     /// }
     /// ```
@@ -419,7 +419,7 @@ impl<S: BuildHasher> AnyInternSet<S> {
     /// let mut set = AnyInternSet::of::<i32>();
     /// unsafe {
     ///     set.intern(42);
-    ///     assert_eq!(*set.get::<i32, _>(&42).unwrap(), &42);
+    ///     assert_eq!(set.get::<i32, _>(&42).as_deref(), Some(&42));
     ///     assert!(set.get::<i32, _>(&99).is_none());
     /// }
     /// ```
