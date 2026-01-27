@@ -13,8 +13,8 @@ crate-type = ["rlib"]
 members = ["crates/*"]
 
 [workspace.dependencies]
-any-intern = { version = "0.1.1", path = "crates/any-intern" }
-logic-eval-util = { version = "0.1.2", path = "crates/logic-eval-util" }
+any-intern = { version = "0.1.2", path = "crates/any-intern" }
+logic-eval-util = { version = "0.1.3", path = "crates/logic-eval-util" }
 indexmap = { version = "2.12.0" }
 ahash = { version = "0.8.12" }
 smallvec = { version = "1.15.1" }

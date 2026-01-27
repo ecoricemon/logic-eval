@@ -11,6 +11,7 @@ use crate::{
     },
 };
 use indexmap::IndexMap;
+use logic_eval_util::reference::Ref;
 use std::{
     borrow::Borrow,
     collections::VecDeque,
@@ -893,7 +894,7 @@ pub(crate) struct NameIntMap<'int, Int: Intern> {
 }
 
 impl<'int, Int: Intern> NameIntMap<'int, Int> {
-    pub(crate) fn new(interner: &'int Int) -> Self {
+    pub(crate) fn new(interner: Ref<'int, Int>) -> Self {
         Self {
             name2int: IdxMap::new(interner),
             int2name: IdxMap::new(interner),
@@ -940,11 +941,11 @@ impl<'int, Int: Intern> NameIntMap<'int, Int> {
 #[derive(Debug)]
 pub(crate) struct IdxMap<'int, K, V, Int> {
     map: IndexMap<K, V>,
-    pub(crate) interner: &'int Int,
+    pub(crate) interner: Ref<'int, Int>,
 }
 
 impl<'int, K, V, Int> IdxMap<'int, K, V, Int> {
-    pub(crate) fn new(interner: &'int Int) -> Self {
+    pub(crate) fn new(interner: Ref<'int, Int>) -> Self {
         Self {
             map: IndexMap::default(),
             interner,
@@ -952,7 +953,7 @@ impl<'int, K, V, Int> IdxMap<'int, K, V, Int> {
     }
 
     pub(crate) fn interner(&self) -> &'int Int {
-        self.interner
+        self.interner.as_ref()
     }
 
     pub(crate) fn len(&self) -> usize {

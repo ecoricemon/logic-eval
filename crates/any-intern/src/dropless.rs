@@ -458,12 +458,12 @@ impl<S: BuildHasher> DroplessInternSet<S> {
                     Self::ref_from_entry(entry.get())
                 }
                 Entry::Vacant(entry) => {
-                    // Safety: Zero size was filtered out above.
-                    let ptr = NonNull::new_unchecked(bytes.as_ptr().cast_mut());
-
                     // We keep the change to the string buffer because we're going to return the
                     // reference to the string buffer.
-                    write_buf.commit();
+                    let bytes = write_buf.commit();
+
+                    // Safety: Zero size was filtered out above.
+                    let ptr = NonNull::new_unchecked(bytes.as_ptr().cast_mut());
 
                     // New set entry
                     let occupied = entry.insert(DynInternEntry {
@@ -616,8 +616,11 @@ impl<'a> StringWriteBuffer<'a> {
     }
 
     #[inline]
-    fn commit(self) {
+    fn commit(self) -> &'a [u8] {
         *self.last_chuck_start += self.written;
+
+        let ptr = self.buf.as_ptr().cast::<u8>();
+        unsafe { slice::from_raw_parts(ptr, self.written) }
     }
 }
 
@@ -755,7 +758,10 @@ mod tests {
         let mut interned_str = Vec::new();
         let mut interned_bytes = Vec::new();
 
+        #[cfg(not(miri))]
         const N: usize = 1000;
+        #[cfg(miri)]
+        const N: usize = 50;
 
         let strs = (0..N).map(|i| (i * 10_000).to_string()).collect::<Vec<_>>();
 
@@ -825,7 +831,10 @@ mod tests {
         let mut interned_8 = Vec::new();
         let mut interned_16 = Vec::new();
 
+        #[cfg(not(miri))]
         const N: usize = 1000;
+        #[cfg(miri)]
+        const N: usize = 50;
 
         // Items being interned have the same first 2 bytes, so they will look like the smae from
         // perspective of interner. But, they must be distinguished from each other due to their

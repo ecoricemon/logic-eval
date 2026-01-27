@@ -362,7 +362,10 @@ mod tests {
     // Address insdie Interned<'_, T> must be valid while the interner lives.
     #[test]
     fn test_fixed_memory_after_huge_number_of_interninig() {
-        const TEST_SIZE_IN_BYTES: isize = 1024 * 1024 * 5; // 5 MB
+        #[cfg(not(miri))]
+        const TEST_SIZE_IN_BYTES: isize = 5 * 1024 * 1024; // 5 MB
+        #[cfg(miri)]
+        const TEST_SIZE_IN_BYTES: isize = 10 * 1024; // 10 KB
 
         let interner = Interner::new();
 

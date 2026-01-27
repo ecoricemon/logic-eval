@@ -6,7 +6,7 @@ use super::{
     repr::{ClauseId, TermStorage, TermStorageLen},
 };
 use crate::{
-    ClauseDatasetIn, ClauseIn, ExprIn, Int2Name, Intern, Map,
+    ClauseDatasetIn, ClauseIn, DefaultInterner, ExprIn, Int2Name, Intern, Map,
     parse::{
         VAR_PREFIX,
         repr::{Clause, Expr, Predicate, Term},
@@ -15,13 +15,14 @@ use crate::{
     prove::repr::{ExprKind, ExprView, TermView, TermViewIter},
 };
 use indexmap::{IndexMap, IndexSet};
+use logic_eval_util::reference::Ref;
 use std::{
     fmt::{self, Write},
     iter,
 };
 
 #[derive(Debug)]
-pub struct Database<'int, Int: Intern> {
+pub struct Database<'int, Int: Intern = DefaultInterner> {
     /// Clause id dataset.
     clauses: IndexMap<Predicate<Integer>, Vec<ClauseId>>,
 
@@ -45,11 +46,53 @@ pub struct Database<'int, Int: Intern> {
     /// This is used when we discard some changes on the DB.
     revert_point: Option<DatabaseState>,
 
-    interner: &'int Int,
+    interner: Ref<'int, Int>,
+}
+
+impl Database<'static> {
+    /// Creates a database with default string interner.
+    ///
+    /// Because creating database through this method makes a leaked memory, you should not forget
+    /// to call [`dealloc`](Self::dealloc).
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
+        let leaked = Box::leak(Box::new(DefaultInterner::default()));
+        let interner = Ref::from_mut(leaked);
+
+        Self {
+            clauses: IndexMap::default(),
+            clause_texts: IndexSet::default(),
+            stor: TermStorage::new(),
+            prover: Prover::new(),
+            nimap: NameIntMap::new(interner),
+            revert_point: None,
+            interner,
+        }
+    }
+
+    #[rustfmt::skip]
+    pub fn dealloc(self) {
+        // Prevents us from accidently implementing Clone for the type. Deallocation relies on the
+        // fact that the type cannot be cloned, so that we have only one instance.
+        #[allow(dead_code)]
+        {
+            struct ImplDetector<T>(std::marker::PhantomData<T>);
+            trait NotClone { const IS_CLONE: bool = false; }
+            impl<T> NotClone for ImplDetector<T> {}
+            impl<T: Clone> ImplDetector<T> { const IS_CLONE: bool = true; }
+            const _: () = const { assert!(!ImplDetector::<Database<'static>>::IS_CLONE) };
+        }
+
+        // Safety:
+        // * There's only one instance and we got the ownership of the instance.
+        let _ = unsafe { Box::from_raw(self.interner.as_ptr()) };
+    }
 }
 
 impl<'int, Int: Intern> Database<'int, Int> {
-    pub fn new(interner: &'int Int) -> Self {
+    pub fn with_interner(interner: &'int Int) -> Self {
+        let interner = Ref::from_ref(interner);
+
         Self {
             clauses: IndexMap::default(),
             clause_texts: IndexSet::default(),
@@ -62,7 +105,7 @@ impl<'int, Int: Intern> Database<'int, Int> {
     }
 
     pub fn interner(&self) -> &'int Int {
-        self.interner
+        self.interner.as_ref()
     }
 
     pub fn terms(&self) -> NamedTermViewIter<'_, 'int, Int> {
@@ -96,12 +139,13 @@ impl<'int, Int: Intern> Database<'int, Int> {
         }
 
         // If this DB contains the given clause, then returns.
-        let serialized =
-            if let Some(converted) = Clause::convert_var_into_num(&clause, self.interner) {
-                converted.to_string()
-            } else {
-                clause.to_string()
-            };
+        let serialized = if let Some(converted) =
+            Clause::convert_var_into_num(&clause, self.interner.as_ref())
+        {
+            converted.to_string()
+        } else {
+            clause.to_string()
+        };
         if !self.clause_texts.insert(serialized) {
             return;
         }
@@ -559,8 +603,7 @@ mod tests {
             assert_eq!(answer, expected);
         }
 
-        let interner = DroplessInterner::default();
-        let mut db = Database::new(&interner);
+        let mut db = Database::new();
 
         insert(&mut db);
         let org_stor_len = db.stor.len();
@@ -571,6 +614,8 @@ mod tests {
         debug_assert_eq!(org_stor_len, db.stor.len());
         query(&mut db);
         debug_assert_eq!(org_stor_len, db.stor.len());
+
+        db.dealloc();
     }
 
     #[test]
@@ -582,8 +627,7 @@ mod tests {
     }
 
     fn test_not_expression() {
-        let interner = DroplessInterner::default();
-        let mut db = Database::new(&interner);
+        let mut db = Database::new();
 
         insert_dataset(
             &mut db,
@@ -594,19 +638,20 @@ mod tests {
         );
 
         let query = "f(a).";
-        let query: Expr<Name<_>> = parse::parse_str(query, &interner).unwrap();
+        let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
         let answer = collect_answer(db.query(query));
         assert!(answer.is_empty());
 
         let query = "f(b).";
-        let query: Expr<Name<_>> = parse::parse_str(query, &interner).unwrap();
+        let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
         let answer = collect_answer(db.query(query));
         assert_eq!(answer.len(), 1);
+
+        db.dealloc();
     }
 
     fn test_and_expression() {
-        let interner = DroplessInterner::default();
-        let mut db = Database::new(&interner);
+        let mut db = Database::new();
 
         insert_dataset(
             &mut db,
@@ -619,17 +664,17 @@ mod tests {
         );
 
         let query = "f($X).";
-        let query: Expr<Name<_>> = parse::parse_str(query, &interner).unwrap();
+        let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
         let answer = collect_answer(db.query(query));
 
         let expected = [["$X = b"]];
-
         assert_eq!(answer, expected);
+
+        db.dealloc();
     }
 
     fn test_or_expression() {
-        let interner = DroplessInterner::default();
-        let mut db = Database::new(&interner);
+        let mut db = Database::new();
 
         insert_dataset(
             &mut db,
@@ -641,17 +686,17 @@ mod tests {
         );
 
         let query = "f($X).";
-        let query: Expr<Name<_>> = parse::parse_str(query, &interner).unwrap();
+        let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
         let answer = collect_answer(db.query(query));
 
         let expected = [["$X = a"], ["$X = b"]];
-
         assert_eq!(answer, expected);
+
+        db.dealloc();
     }
 
     fn test_mixed_expression() {
-        let interner = DroplessInterner::default();
-        let mut db = Database::new(&interner);
+        let mut db = Database::new();
 
         insert_dataset(
             &mut db,
@@ -670,12 +715,13 @@ mod tests {
         );
 
         let query = "f($X).";
-        let query: Expr<Name<_>> = parse::parse_str(query, &interner).unwrap();
+        let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
         let answer = collect_answer(db.query(query));
 
         let expected = [["$X = b"]];
-
         assert_eq!(answer, expected);
+
+        db.dealloc();
     }
 
     #[test]
@@ -685,8 +731,7 @@ mod tests {
     }
 
     fn test_simple_recursion() {
-        let interner = DroplessInterner::default();
-        let mut db = Database::new(&interner);
+        let mut db = Database::new();
 
         insert_dataset(
             &mut db,
@@ -699,7 +744,7 @@ mod tests {
         );
 
         let query = "impl(Clone, $T).";
-        let query: Expr<Name<_>> = parse::parse_str(query, &interner).unwrap();
+        let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
         let mut cx = db.query(query);
 
         let mut assert_next = |expected: &[&str]| {
@@ -717,11 +762,13 @@ mod tests {
         assert_next(&["$T = Vec(Vec(a))"]);
         assert_next(&["$T = Vec(Vec(b))"]);
         assert_next(&["$T = Vec(Vec(c))"]);
+
+        drop(cx);
+        db.dealloc();
     }
 
     fn test_right_recursion() {
-        let interner = DroplessInterner::default();
-        let mut db = Database::new(&interner);
+        let mut db = Database::new();
 
         insert_dataset(
             &mut db,
@@ -735,7 +782,7 @@ mod tests {
         );
 
         let query = "descend($X, $Y).";
-        let query: Expr<Name<_>> = parse::parse_str(query, &interner).unwrap();
+        let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
         let mut answer = collect_answer(db.query(query));
 
         let mut expected = [
@@ -750,31 +797,34 @@ mod tests {
         answer.sort_unstable();
         expected.sort_unstable();
         assert_eq!(answer, expected);
+
+        db.dealloc();
     }
 
     #[test]
     fn test_discarding_uncomitted_change() {
-        let interner = DroplessInterner::default();
-        let mut db = Database::new(&interner);
+        let mut db = Database::new();
 
         let text = "f(a).";
-        let clause = parse::parse_str(text, &interner).unwrap();
+        let clause = parse::parse_str(text, db.interner()).unwrap();
         db.insert_clause(clause);
         let fa_state = db.state();
         db.commit();
 
         let text = "f(b).";
-        let clause = parse::parse_str(text, &interner).unwrap();
+        let clause = parse::parse_str(text, db.interner()).unwrap();
         db.insert_clause(clause);
 
         let query = "f($X).";
-        let query: Expr<Name<_>> = parse::parse_str(query, &interner).unwrap();
+        let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
         let answer = collect_answer(db.query(query));
 
         // `f(b).` was discarded.
         let expected = [["$X = a"]];
         assert_eq!(answer, expected);
         assert_eq!(db.state(), fa_state);
+
+        db.dealloc();
     }
 
     fn insert_dataset<Int: Intern>(db: &mut Database<'_, Int>, text: &str) {

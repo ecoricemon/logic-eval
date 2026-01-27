@@ -22,11 +22,12 @@ pub mod intern {
 
 use std::{
     borrow::Borrow,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     error::Error as StdError,
     fmt::{self, Debug, Display},
     hash::{BuildHasherDefault, Hash, Hasher},
     result::Result as StdResult,
+    sync::{Arc, Mutex},
 };
 
 // === Hash map and set used within this crate ===
@@ -74,6 +75,40 @@ pub trait Intern {
 
     fn intern_str(&self, text: &str) -> Self::InternedStr<'_> {
         self.intern_formatted_str(text, text.len()).unwrap()
+    }
+}
+
+type DefaultInternerInner = HashSet<Arc<str>, fxhash::FxBuildHasher>;
+pub struct DefaultInterner(Mutex<DefaultInternerInner>);
+
+impl Default for DefaultInterner {
+    fn default() -> Self {
+        let set = HashSet::default();
+        Self(Mutex::new(set))
+    }
+}
+
+impl Intern for DefaultInterner {
+    type InternedStr<'a>
+        = Arc<str>
+    where
+        Self: 'a;
+
+    fn intern_formatted_str<T: Display + ?Sized>(
+        &self,
+        value: &T,
+        _: usize,
+    ) -> StdResult<Self::InternedStr<'_>, fmt::Error> {
+        let mut set = self.0.lock().unwrap();
+
+        let value = value.to_string();
+        if let Some(existing_value) = set.get(&*value) {
+            Ok(existing_value.clone())
+        } else {
+            let value: Arc<str> = value.into();
+            set.insert(value.clone());
+            Ok(value)
+        }
     }
 }
 

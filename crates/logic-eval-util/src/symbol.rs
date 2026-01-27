@@ -1,34 +1,18 @@
 use crate::Map;
-use any_intern::Interned;
 use std::{borrow::Borrow, hash::Hash};
 
 #[derive(Debug)]
-pub struct SymbolTable<'int, T> {
-    map: Map<Interned<'int, str>, Vec<Symbol<T>>>,
+pub struct SymbolTable<K, V> {
+    map: Map<K, Vec<Symbol<V>>>,
 }
 
-impl<'int, T> SymbolTable<'int, T> {
+impl<K, V> SymbolTable<K, V> {
     pub fn clear(&mut self) {
         self.map.clear();
     }
 
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
-    }
-
-    pub fn push(&mut self, name: Interned<'int, str>, symbol: T) {
-        if let Some(v) = self.map.get_mut(&name) {
-            v.push(Symbol::Data(symbol));
-        } else {
-            self.map.insert(name, vec![Symbol::Data(symbol)]);
-        }
-    }
-
-    pub fn pop(&mut self, name: Interned<'int, str>) -> Option<T> {
-        match self.map.get_mut(&name)?.pop()? {
-            Symbol::Data(v) => Some(v),
-            Symbol::Transparent | Symbol::Opaque => None,
-        }
     }
 
     pub fn push_transparent_block(&mut self) {
@@ -49,10 +33,31 @@ impl<'int, T> SymbolTable<'int, T> {
         }
         self.map.retain(|_, v| !v.is_empty());
     }
+}
 
-    pub fn get<Q>(&self, name: &Q) -> Option<&T>
+impl<K: Hash + Eq, V> SymbolTable<K, V> {
+    pub fn push(&mut self, name: K, symbol: V) {
+        if let Some(v) = self.map.get_mut(&name) {
+            v.push(Symbol::Data(symbol));
+        } else {
+            self.map.insert(name, vec![Symbol::Data(symbol)]);
+        }
+    }
+
+    pub fn pop<Q>(&mut self, name: &Q) -> Option<V>
     where
-        Interned<'int, str>: Borrow<Q>,
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        match self.map.get_mut(name)?.pop()? {
+            Symbol::Data(v) => Some(v),
+            Symbol::Transparent | Symbol::Opaque => None,
+        }
+    }
+
+    pub fn get<Q>(&self, name: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.map.get(name)?.iter().rev().find_map(|x| match x {
@@ -62,9 +67,9 @@ impl<'int, T> SymbolTable<'int, T> {
         })?
     }
 
-    pub fn get_mut<Q>(&mut self, name: &Q) -> Option<&mut T>
+    pub fn get_mut<Q>(&mut self, name: &Q) -> Option<&mut V>
     where
-        Interned<'int, str>: Borrow<Q>,
+        K: Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
         self.map
@@ -79,7 +84,7 @@ impl<'int, T> SymbolTable<'int, T> {
     }
 }
 
-impl<T> Default for SymbolTable<'_, T> {
+impl<K, V> Default for SymbolTable<K, V> {
     fn default() -> Self {
         Self {
             map: Map::default(),

@@ -543,12 +543,11 @@ impl AnyArena {
     fn drop_all(&mut self) {
         if let Some(raw_drop_slice) = self.raw_drop_slice {
             if self.stride > 0 {
-                for chunk in self.bump.iter_allocated_chunks() {
-                    // Chunk would not be divisible by the `stride` especially when the stride is
-                    // greater than 16. In that case, we should ignore the remainder.
-                    let num_elems = chunk.len() / self.stride;
-                    let ptr = chunk.as_ptr().cast::<u8>().cast_mut();
-                    unsafe {
+                unsafe {
+                    for (ptr, len) in self.bump.iter_allocated_chunks_raw() {
+                        // Chunk would not be divisible by the `stride` especially when the stride
+                        // is greater than 16. In that case, we should ignore the remainder.
+                        let num_elems = len / self.stride;
                         raw_drop_slice(ptr, num_elems);
                     }
                 }

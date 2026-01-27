@@ -32,12 +32,12 @@ impl<T> TypedArena<T> {
         if mem::needs_drop::<T>() {
             if size_of::<T>() > 0 {
                 let stride = Layout::new::<T>().pad_to_align().size();
-                for chunk in self.bump.iter_allocated_chunks() {
-                    // Chunk would not be divisible by the `stride` especially when the stride is
-                    // greater than 16. In that case, we should ignore the remainder.
-                    let num_elems = chunk.len() / stride;
-                    let ptr = chunk.as_ptr().cast::<T>().cast_mut();
-                    unsafe {
+                unsafe {
+                    for (ptr, len) in self.bump.iter_allocated_chunks_raw() {
+                        // Chunk would not be divisible by the `stride` especially when the stride
+                        // is greater than 16. In that case, we should ignore the remainder.
+                        let num_elems = len / stride;
+                        let ptr = ptr.cast::<T>();
                         let slice = slice::from_raw_parts_mut(ptr, num_elems);
                         ptr::drop_in_place(slice);
                     }

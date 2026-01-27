@@ -1,6 +1,6 @@
 [package]
 name = "logic-eval-util"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.89"
 description = "utility for logic-eval"
@@ -12,6 +12,5 @@ license = "Apache-2.0 OR MIT"
 crate-type = ["rlib"]
 
 [dependencies]
-any-intern = { workspace = true }
 smallvec = { workspace = true }
 fxhash = { workspace = true }
