@@ -2,6 +2,11 @@
 
 A simple logic evaluator.
 
+[![Crates.io][crates-badge]][crates-url]
+
+[crates-badge]: https://img.shields.io/crates/v/logic-eval.svg
+[crates-url]: https://crates.io/crates/logic-eval
+
 ## Example
 
 ```rust

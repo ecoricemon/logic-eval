@@ -4,6 +4,11 @@
 various use cases, ensuring that each unique value is stored only once, saving memory and improving
 lookup efficiency.
 
+[![Crates.io][crates-badge]][crates-url]
+
+[crates-badge]: https://img.shields.io/crates/v/any-intern.svg
+[crates-url]: https://crates.io/crates/any-intern
+
 ## Examples
 
 ### Interner

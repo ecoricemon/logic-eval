@@ -22,17 +22,6 @@ paste = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 
-# Test with sanitizer
-[[example]]
-name = "asan"
-path = "tests-san/asan.rs"
-crate-type = ["bin"]
-
-[[example]]
-name = "tsan"
-path = "tests-san/tsan.rs"
-crate-type = ["bin"]
-
 [[bench]]
 name = "bench"
 harness = false
