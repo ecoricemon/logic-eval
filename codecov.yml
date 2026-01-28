@@ -1,0 +1,10 @@
+flags:
+  any-intern:
+    paths:
+      - crates/any-intern/
+  logic-eval:
+    paths:
+      - crates/logic-eval/
+  logic-eval-util:
+    paths:
+      - crates/logic-eval-util/

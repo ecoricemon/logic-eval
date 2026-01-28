@@ -19,26 +19,8 @@ concurrency:
   cancel-in-progress: true
 name: test
 jobs:
-  discover-crates:
-    runs-on: ubuntu-latest
-    name: discover
-    outputs:
-      matrix: ${{ steps.discover.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # tag=v6.0.1
-        with:
-          submodules: true
-      - name: Discover crates
-        id: discover
-        run: |
-          # Get all directories under crates/ that have Cargo.toml
-          crates=$(find crates -maxdepth 2 -name "Cargo.toml" -exec dirname {} \; | xargs -I {} basename {})
-          # Convert to JSON array for matrix
-          matrix_json=$(echo "$crates" | jq -R -s -c 'split("\n") | map(select(. != ""))')
-          echo "matrix=$matrix_json" >> "$GITHUB_OUTPUT"
   required:
     runs-on: ubuntu-latest
-    needs: discover-crates
     name: ubuntu / stable
     strategy:
       matrix:
@@ -55,20 +37,13 @@ jobs:
         # enable this ci template to run regardless of whether the lockfile is checked in or not
         if: hashFiles('Cargo.lock') == ''
         run: cargo generate-lockfile
-        working-directory: crates/${{ matrix.crate }}
       - name: cargo test --locked
-        run: cargo test --locked --all-features --all-targets
-        working-directory: crates/${{ matrix.crate }}
+        run: cargo test --workspace --locked --all-features --all-targets
       - name: cargo test --doc
-        run: cargo test --locked --all-features --doc
-        working-directory: crates/${{ matrix.crate }}
+        run: cargo test --workspace --locked --all-features --doc
   coverage:
     runs-on: ubuntu-latest
-    needs: discover-crates
     name: ubuntu / stable / coverage
-    strategy:
-      matrix:
-        crate: ${{ fromJson(needs.discover-crates.outputs.matrix) }}
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # tag=v6.0.1
         with:
@@ -88,15 +63,10 @@ jobs:
         if: hashFiles('Cargo.lock') == ''
         run: cargo generate-lockfile
       - name: cargo llvm-cov
-        run: |
-          cargo llvm-cov --locked --all-features --lcov --output-path lcov.info
-          mkdir -p ../../covout
-          mv lcov.info "../../covout/${{ matrix.crate }}.info"
-        working-directory: crates/${{ matrix.crate }}
+        run: cargo llvm-cov --workspace --locked --all-features --lcov --output-path lcov.info
       - name: Upload to codecov.io
         uses: codecov/codecov-action@671740ac38dd9b0130fbe1cec585b89eea48d3de # tag=v5.5.2
         with:
           fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
           env_vars: OS,RUST
-          directory: covout
