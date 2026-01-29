@@ -3,9 +3,15 @@
 A simple logic evaluator.
 
 [![Crates.io][crates-badge]][crates-url]
+[![CI Status][ci-badge]][ci-url]
+[![Codecov][codecov-badge]][codecov-url]
 
 [crates-badge]: https://img.shields.io/crates/v/logic-eval.svg
 [crates-url]: https://crates.io/crates/logic-eval
+[ci-badge]: https://github.com/ecoricemon/logic-eval/actions/workflows/test.yml/badge.svg
+[ci-url]: https://github.com/ecoricemon/logic-eval/actions/workflows/test.yml
+[codecov-badge]: https://codecov.io/gh/ecoricemon/logic-eval/graph/badge.svg?flag=logic-eval
+[codecov-url]: https://app.codecov.io/gh/ecoricemon/logic-eval?flags%5B0%5D=logic-eval
 
 ## Example
 

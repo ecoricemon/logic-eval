@@ -5,9 +5,15 @@ various use cases, ensuring that each unique value is stored only once, saving m
 lookup efficiency.
 
 [![Crates.io][crates-badge]][crates-url]
+[![CI Status][ci-badge]][ci-url]
+[![Codecov][codecov-badge]][codecov-url]
 
 [crates-badge]: https://img.shields.io/crates/v/any-intern.svg
 [crates-url]: https://crates.io/crates/any-intern
+[ci-badge]: https://github.com/ecoricemon/logic-eval/actions/workflows/test.yml/badge.svg
+[ci-url]: https://github.com/ecoricemon/logic-eval/actions/workflows/test.yml
+[codecov-badge]: https://codecov.io/gh/ecoricemon/logic-eval/graph/badge.svg?flag=any-intern
+[codecov-url]: https://app.codecov.io/gh/ecoricemon/logic-eval?flags%5B0%5D=any-intern
 
 ## Examples
 
