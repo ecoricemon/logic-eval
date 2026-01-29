@@ -6,6 +6,7 @@
 # several checks:
 # - fmt: checks that the code is formatted according to rustfmt
 # - clippy: checks that the code does not contain any clippy warnings
+name: check
 permissions:
   contents: read
 # This configuration allows maintainers of this repo to create a branch and pull request based on
@@ -20,18 +21,17 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
-name: check
 jobs:
   discover-crates:
+    name: discover / sub-crate
     runs-on: ubuntu-latest
-    name: discover
     outputs:
       matrix: ${{ steps.discover.outputs.matrix }}
     steps:
       - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # tag=v6.0.1
         with:
           submodules: true
-      - name: Discover crates
+      - name: Discover sub-crates
         id: discover
         run: |
           # Get all directories under crates/ that have Cargo.toml
@@ -40,9 +40,9 @@ jobs:
           matrix_json=$(echo "$crates" | jq -R -s -c 'split("\n") | map(select(. != ""))')
           echo "matrix=$matrix_json" >> "$GITHUB_OUTPUT"
   fmt:
+    name: stable / fmt
     runs-on: ubuntu-latest
     needs: discover-crates
-    name: stable / fmt
     strategy:
       matrix:
         crate: ${{ fromJson(needs.discover-crates.outputs.matrix) }}
@@ -59,9 +59,9 @@ jobs:
         run: cargo fmt --check
         working-directory: crates/${{ matrix.crate }}
   clippy:
+    name: stable / clippy
     runs-on: ubuntu-latest
     needs: discover-crates
-    name: stable / clippy
     strategy:
       matrix:
         crate: ${{ fromJson(needs.discover-crates.outputs.matrix) }}
