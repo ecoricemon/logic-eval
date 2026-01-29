@@ -58,7 +58,7 @@ jobs:
             unsafe_count=$(grep -r "unsafe" . | wc -l)
             if [ "$unsafe_count" -gt 0 ]; then
               echo "Crate $crate contains unsafe code!"
-              unsafe_crates+=("$crate")
+              unsafe_crates+=("\"$crate\"") # Add quotes around crate names
             else
               echo "Crate $crate is safe."
             fi
