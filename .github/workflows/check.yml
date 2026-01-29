@@ -55,7 +55,7 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt
-      - name: cargo fmt --check
+      - name: cargo fmt --check in ${{ matrix.crate }}
         run: cargo fmt --check
         working-directory: crates/${{ matrix.crate }}
   clippy:
