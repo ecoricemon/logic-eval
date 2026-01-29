@@ -64,8 +64,8 @@ jobs:
             fi
             cd - > /dev/null
           done
-          # Convert the unsafe crates array to a JSON array
-          unsafe_crates_json=$(printf '%s\n' "${unsafe_crates[@]}" | jq -R . | jq -s .)
+          # Convert the unsafe crates array to a properly formatted JSON array
+          unsafe_crates_json=$(printf "[%s]" "$(IFS=,; echo "${unsafe_crates[*]}")")
           echo "unsafe_crates=$unsafe_crates_json" >> "$GITHUB_OUTPUT"
   sanitizers:
     name: nightly / sanitizer
