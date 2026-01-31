@@ -1,18 +1,18 @@
 use super::{
     prover::{
-        Integer, NameIntMap, NameIntMapState, ProveCx, Prover,
         format::{NamedExprView, NamedTermView},
+        Integer, NameIntMap, NameIntMapState, ProveCx, Prover,
     },
     repr::{ClauseId, TermStorage, TermStorageLen},
 };
 use crate::{
-    ClauseDatasetIn, ClauseIn, DefaultInterner, ExprIn, Int2Name, Intern, Map,
     parse::{
-        VAR_PREFIX,
         repr::{Clause, Expr, Predicate, Term},
         text::Name,
+        VAR_PREFIX,
     },
     prove::repr::{ExprKind, ExprView, TermView, TermViewIter},
+    ClauseDatasetIn, ClauseIn, DefaultInterner, ExprIn, Int2Name, Intern, Map,
 };
 use indexmap::{IndexMap, IndexSet};
 use logic_eval_util::reference::Ref;

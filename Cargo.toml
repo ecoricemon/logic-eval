@@ -1,27 +1,15 @@
-[package]
-name = "logic-eval-home"
-version = "0.0.0"
-edition = "2024"
-rust-version = "1.89"
-repository = "https://github.com/ecoricemon/logic-eval"
-license = "Apache-2.0 OR MIT"
-
-[lib]
-crate-type = ["rlib"]
-
 [workspace]
+resolver = "2"
 members = ["crates/*"]
 
 [workspace.dependencies]
 any-intern = { version = "0.1.2", path = "crates/any-intern" }
 logic-eval-util = { version = "0.1.3", path = "crates/logic-eval-util" }
-indexmap = { version = "2.12.0" }
-ahash = { version = "0.8.12" }
-smallvec = { version = "1.15.1" }
-bumpalo = { version = "3.19.1" }
-fxhash = { version = "0.2.1" }
-hashbrown = { version = "0.16.1" }
-parking_lot = { version = "0.12.5" }
-paste = { version = "1.0.15" }
+indexmap = "2.2.1"
+smallvec = "1"
+bumpalo = "3.10"
+fxhash = "0.2.1"
+hashbrown = "0.14.2"
+parking_lot = "0.10.2"
 # Dev dependencies
-criterion = { version = "0.8.1" }
+criterion = "0.4"

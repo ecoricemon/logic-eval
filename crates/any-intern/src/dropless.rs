@@ -1,10 +1,11 @@
 use super::common::{Interned, RawInterned, UnsafeLock};
 use bumpalo::Bump;
-use hashbrown::{HashTable, hash_table::Entry};
+use core::str;
+use hashbrown::{hash_table::Entry, HashTable};
 use std::{
     alloc::Layout,
-    fmt::{self, Display, Write},
-    hash::{BuildHasher, Hash},
+    fmt::{self, Debug, Display, Write},
+    hash::{BuildHasher, Hash, Hasher},
     mem::MaybeUninit,
     ptr::{self, NonNull},
     slice,
@@ -30,13 +31,14 @@ use std::{
 /// use any_intern::Dropless;
 /// use std::alloc::Layout;
 /// use std::ptr::NonNull;
+/// use std::hash::{Hash, Hasher, BuildHasher};
 ///
 /// #[derive(PartialEq, Eq, Hash, Debug)]
 /// struct MyType(u32);
 ///
 /// impl Dropless for MyType {
 ///     fn as_byte_ptr(&self) -> NonNull<u8> {
-///         NonNull::from_ref(self).cast::<u8>()
+///         unsafe { NonNull::new_unchecked(self as *const Self as *mut Self).cast::<u8>() }
 ///     }
 ///
 ///     fn layout(&self) -> Layout {
@@ -48,9 +50,11 @@ use std::{
 ///         unsafe { ptr.as_ref().unwrap_unchecked() }
 ///     }
 ///
-///     unsafe fn hash<S: std::hash::BuildHasher>(build_hasher: &S, bytes: &[u8]) -> u64 {
+///     unsafe fn hash<S: BuildHasher>(hash_builder: &S, bytes: &[u8]) -> u64 {
 ///         let this = unsafe { Self::from_bytes(bytes) };
-///         build_hasher.hash_one(this)
+///         let mut hasher = hash_builder.build_hasher();
+///         this.hash(&mut hasher);
+///         hasher.finish()
 ///     }
 ///
 ///     unsafe fn eq(a: &[u8], b: &[u8]) -> bool {
@@ -61,7 +65,8 @@ use std::{
 pub trait Dropless {
     /// Returns pointer to the instance.
     fn as_byte_ptr(&self) -> NonNull<u8> {
-        NonNull::from_ref(self).cast::<u8>()
+        // Safety: A reference is non-null
+        unsafe { NonNull::new_unchecked(self as *const Self as *mut Self).cast::<u8>() }
     }
 
     /// Returns layout of the type.
@@ -89,7 +94,7 @@ pub trait Dropless {
     /// Undefined behavior if any conditions below are not met.
     /// * Implementation should interpret the byte slice into the type correctly.
     /// * Caller should give well aligned data for the type.
-    unsafe fn hash<S: BuildHasher>(build_hasher: &S, bytes: &[u8]) -> u64;
+    unsafe fn hash<S: BuildHasher>(hash_builder: &S, bytes: &[u8]) -> u64;
 
     /// Compares two byte slices for equality as instances of the type.
     ///
@@ -111,9 +116,11 @@ macro_rules! simple_impl_dropless_fn {
         }
     };
     (hash) => {
-        unsafe fn hash<S: BuildHasher>(build_hasher: &S, bytes: &[u8]) -> u64 {
+        unsafe fn hash<S: BuildHasher>(hash_builder: &S, bytes: &[u8]) -> u64 {
             let this = unsafe { Self::from_bytes(bytes) };
-            build_hasher.hash_one(this)
+            let mut hasher = hash_builder.build_hasher();
+            this.hash(&mut hasher);
+            hasher.finish()
         }
     };
     (eq) => {
@@ -156,7 +163,7 @@ impl<T: Dropless + Hash + Eq, const N: usize> Dropless for [T; N] {
 
 impl Dropless for str {
     unsafe fn from_bytes(bytes: &[u8]) -> &Self {
-        unsafe { str::from_utf8_unchecked(bytes) }
+        unsafe { std::str::from_utf8_unchecked(bytes) }
     }
     simple_impl_dropless_fn!(hash);
     simple_impl_dropless_fn!(eq);
@@ -391,10 +398,13 @@ impl<S: BuildHasher> DroplessInternSet<S> {
 
         unsafe {
             // Allocation for zero sized data should be avoided even if Bump allocator allows it.
-            // Plus, we change its address to make it static for equality test.
+            // Plus, we change its address to make it have fixed address for equality test.
+            // But this would change nothing actually.
             if layout.size() == 0 {
-                let ptr = value as *const K;
-                let ptr = ptr.with_addr(layout.align()); // Like ptr::dangling()
+                // Safety: Making a pointer to ZST and acessing through it is safe.
+                let mut ptr = value as *const K;
+                let addr_part = &mut ptr as *mut *const K as *mut *const () as *mut usize;
+                *addr_part = layout.align(); // Like ptr::dangling()
                 return Interned::unique(&*ptr);
             }
 
@@ -433,17 +443,16 @@ impl<S: BuildHasher> DroplessInternSet<S> {
         let bytes = write_buf.as_bytes();
 
         unsafe {
-            // Safety
-            // We wrote it down to the buffer through Display trait, so it is definitely UTF-8.
-            // ref: https://doc.rust-lang.org/std/fmt/index.html#fmtdisplay-vs-fmtdebug
-            let value = str::from_utf8_unchecked(bytes);
             let layout = Layout::from_size_align_unchecked(bytes.len(), 1);
 
-            // We change address to make it static for equality test.
+            // We change address to make it have fixed address for equality test.
+            // But this would change nothing actually.
             if bytes.is_empty() {
-                let ptr = value as *const str;
-                let ptr = ptr.with_addr(layout.align()); // Like ptr::dangling()
-                return Ok(Interned::unique(&*ptr));
+                // Safety: Making a pointer to ZST and acessing through it is safe.
+                let dangling_ptr = NonNull::<u8>::dangling().as_ptr().cast_const();
+                let empty_slice = slice::from_raw_parts(dangling_ptr, 0);
+                let empty_str = std::str::from_utf8_unchecked(empty_slice);
+                return Ok(Interned::unique(empty_str));
             }
 
             let hash = <str as Dropless>::hash(&self.hash_builder, bytes);
@@ -519,10 +528,10 @@ impl<S: BuildHasher> DroplessInternSet<S> {
 
     /// Returns `eq` closure that is used for some methods on the [`HashTable`].
     #[inline]
-    fn table_eq<K: Dropless + ?Sized>(
-        key: &[u8],
+    fn table_eq<'a, K: Dropless + ?Sized>(
+        key: &'a [u8],
         layout: Layout,
-    ) -> impl FnMut(&DynInternEntry<S>) -> bool {
+    ) -> impl FnMut(&DynInternEntry<S>) -> bool + 'a {
         move |entry: &DynInternEntry<S>| unsafe {
             if layout == entry.layout {
                 let entry_bytes =
@@ -536,7 +545,7 @@ impl<S: BuildHasher> DroplessInternSet<S> {
 
     /// Returns `hasher` closure that is used for some methods on the [`HashTable`].
     #[inline]
-    fn table_hasher(hash_builder: &S) -> impl Fn(&DynInternEntry<S>) -> u64 {
+    fn table_hasher<'a>(hash_builder: &'a S) -> impl Fn(&DynInternEntry<S>) -> u64 + 'a {
         |entry: &DynInternEntry<S>| unsafe {
             let entry_bytes =
                 slice::from_raw_parts(entry.data.cast::<u8>().as_ptr(), entry.layout.size());
@@ -596,8 +605,12 @@ impl StringBuffer {
 
     #[inline]
     fn append_new_chunk(&mut self, chunk_size: usize) {
-        let chunk = Box::new_uninit_slice(chunk_size);
-        self.chunks.push(chunk);
+        let mut chunk: Vec<MaybeUninit<u8>> = Vec::with_capacity(chunk_size);
+
+        // Safety: We reserved enough amount of memory, also it can contain uninitialized data.
+        unsafe { chunk.set_len(chunk_size) };
+
+        self.chunks.push(chunk.into_boxed_slice());
         self.last_chunk_start = 0;
     }
 }
@@ -650,12 +663,20 @@ impl Write for StringWriteBuffer<'_> {
     }
 }
 
-#[derive(Debug)]
 struct DynInternEntry<S> {
     data: RawInterned,
     layout: Layout,
     /// Input bytes must be well aligned.
     hash: unsafe fn(&S, &[u8]) -> u64,
+}
+
+impl<S> Debug for DynInternEntry<S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DynInternEntry")
+            .field("data", &self.data)
+            .field("layout", &self.layout)
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]

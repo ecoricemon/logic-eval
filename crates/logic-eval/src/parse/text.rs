@@ -1,7 +1,7 @@
 use super::{
+    repr::{Clause, Expr, Term},
     CloseParenToken, CommaToken, DotToken, HornToken, Ident, NegationToken, OpenParenToken, Parse,
     ParseBuffer, VAR_PREFIX,
-    repr::{Clause, Expr, Term},
 };
 use crate::{ClauseDatasetIn, ClauseIn, Error, ExprIn, Intern, NameIn, Result, TermIn};
 use std::{
@@ -160,7 +160,7 @@ impl Term<Name<()>> {
     fn parse_args<'int, Int: Intern>(
         buf: &mut ParseBuffer<'_>,
         interner: &'int Int,
-    ) -> Result<Box<[TermIn<'int, Int>]>> {
+    ) -> Result<Vec<TermIn<'int, Int>>> {
         let mut open = 0;
         while let Some((_, moved_buf)) = buf.peek_parse::<Int, OpenParenToken>(interner) {
             *buf = moved_buf;
@@ -195,7 +195,7 @@ impl Term<Name<()>> {
             buf.parse::<Int, CloseParenToken>(interner)?;
         }
 
-        Ok(args.into())
+        Ok(args)
     }
 }
 

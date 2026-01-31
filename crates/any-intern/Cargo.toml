@@ -1,8 +1,8 @@
 [package]
 name = "any-intern"
-version = "0.1.2"
-edition = "2024"
-rust-version = "1.89"
+version = "0.1.3"
+edition = "2021"
+rust-version = "1.65"
 description = "An interner for various types"
 readme = "README.md"
 repository = "https://github.com/ecoricemon/logic-eval"
@@ -17,7 +17,11 @@ bumpalo = { workspace = true }
 fxhash = { workspace = true }
 hashbrown = { workspace = true }
 parking_lot = { workspace = true }
-paste = { workspace = true }
+
+# --- TRANSITIVE PINS ---
+# The following is not used directly by this crate. It is pinned to a specific version to ensure
+# that 'cargo update -Z minimal-versions' results in a working build on our rust-version 1.65.
+ahash = "0.8.7"
 
 [dev-dependencies]
 criterion = { workspace = true }

@@ -1,4 +1,4 @@
-use parking_lot::{RawMutex, lock_api::RawMutex as _};
+use parking_lot::{lock_api::RawMutex as _, RawMutex};
 use std::{
     borrow::Borrow,
     cell::UnsafeCell,
@@ -16,13 +16,14 @@ pub struct Interned<'a, T: ?Sized>(pub &'a T, Prv);
 
 impl<'a, T: ?Sized> Interned<'a, T> {
     pub fn raw(&self) -> RawInterned<T> {
-        let ptr = NonNull::from_ref(self.0);
+        // Safety: A reference is non-null
+        let ptr = unsafe { NonNull::new_unchecked(self.0 as *const T as *mut T) };
         RawInterned(ptr)
     }
 
     pub fn erased_raw(&self) -> RawInterned {
-        let ptr = NonNull::from_ref(self.0).cast::<Prv>();
-        RawInterned(ptr)
+        let ptr = unsafe { NonNull::new_unchecked(self.0 as *const T as *mut T) };
+        RawInterned(ptr.cast::<Prv>())
     }
 
     /// Caller should guarantee that the value is unique in an interner.
@@ -55,7 +56,7 @@ impl<'a, T> Interned<'a, T> {
 /// Compares data addresses only, which is sufficient for interned values.
 impl<T: ?Sized> PartialEq for Interned<'_, T> {
     fn eq(&self, other: &Self) -> bool {
-        ptr::addr_eq(self.0, other.0)
+        (self.0 as *const T as *const ()) == (other.0 as *const T as *const ())
     }
 }
 
@@ -150,7 +151,7 @@ impl<T: ?Sized> RawInterned<T> {
 /// Pointer comparison by address.
 impl<T: ?Sized> PartialEq for RawInterned<T> {
     fn eq(&self, other: &Self) -> bool {
-        ptr::addr_eq(self.0.as_ptr(), other.0.as_ptr())
+        (self.as_ptr() as *mut ()) == (other.as_ptr() as *mut ())
     }
 }
 
@@ -269,7 +270,7 @@ impl<T: ?Sized> UnsafeLock<T> {
     ///
     /// Must follow [`lock`](Self::lock).
     pub unsafe fn unlock(&self) {
-        unsafe { self.inner.mutex.unlock() };
+        self.inner.mutex.unlock();
     }
 }
 

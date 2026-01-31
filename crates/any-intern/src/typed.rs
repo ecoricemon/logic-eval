@@ -1,5 +1,12 @@
 use bumpalo::Bump;
-use std::{alloc::Layout, cell::Cell, marker::PhantomData, mem, ptr, slice};
+use std::{
+    alloc::Layout,
+    cell::Cell,
+    marker::PhantomData,
+    mem,
+    ptr::{self, NonNull},
+    slice,
+};
 
 pub struct TypedArena<T> {
     bump: Bump,
@@ -9,11 +16,11 @@ pub struct TypedArena<T> {
 
 impl<T> TypedArena<T> {
     /// Returns number of elements in this arena.
-    pub const fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.len.get()
     }
 
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
@@ -30,7 +37,7 @@ impl<T> TypedArena<T> {
 
     fn drop_all(&mut self) {
         if mem::needs_drop::<T>() {
-            if size_of::<T>() > 0 {
+            if mem::size_of::<T>() > 0 {
                 let stride = Layout::new::<T>().pad_to_align().size();
                 unsafe {
                     for (ptr, len) in self.bump.iter_allocated_chunks_raw() {
@@ -43,7 +50,7 @@ impl<T> TypedArena<T> {
                     }
                 }
             } else {
-                let ptr = ptr::dangling_mut::<T>();
+                let ptr = NonNull::<T>::dangling().as_ptr();
                 unsafe {
                     let slice = slice::from_raw_parts_mut(ptr, self.len());
                     ptr::drop_in_place(slice);

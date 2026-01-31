@@ -16,20 +16,27 @@ pub struct Ref<'a, T: 'a + ?Sized> {
 
 impl<'a, T: 'a + ?Sized> Ref<'a, T> {
     pub const fn from_ref(r: &'a T) -> Self {
+        // Safety: A referenfce is non-null
+        let ptr = unsafe { NonNull::new_unchecked(r as *const T as *mut T) };
         Self {
-            ptr: NonNull::from_ref(r),
+            ptr,
             _marker: PhantomData,
         }
     }
 
-    pub const fn from_mut(r: &'a mut T) -> Self {
+    pub fn from_mut(r: &'a mut T) -> Self {
+        // Safety: A referenfce is non-null
+        let ptr = unsafe { NonNull::new_unchecked(r as *mut T) };
         Self {
-            ptr: NonNull::from_mut(r),
+            ptr,
             _marker: PhantomData,
         }
     }
 
-    pub const fn as_ref(&self) -> &'a T {
+    // Output lifetime is 'a, so we need this method rather than AsRef::as_ref or something like
+    // that.
+    #[allow(clippy::should_implement_trait)]
+    pub fn as_ref(&self) -> &'a T {
         // Safety: The type actually has the `&'a T`.
         unsafe { self.ptr.as_ref() }
     }

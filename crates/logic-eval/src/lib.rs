@@ -7,7 +7,7 @@ mod prove;
 
 pub use parse::{
     inner::VAR_PREFIX,
-    inner::{Parse, parse_str},
+    inner::{parse_str, Parse},
     repr::{Clause, ClauseDataset, Expr, Predicate, Term},
     text::Name,
 };
@@ -155,7 +155,7 @@ impl Intern for any_intern::Interner {
 pub(crate) use intern_alias::*;
 #[allow(unused)]
 mod intern_alias {
-    use super::{Intern, parse, prove};
+    use super::{parse, prove, Intern};
     pub(crate) type NameIn<'int, Int> = parse::text::Name<<Int as Intern>::InternedStr<'int>>;
     pub(crate) type TermIn<'int, Int> = parse::repr::Term<NameIn<'int, Int>>;
     pub(crate) type ExprIn<'int, Int> = parse::repr::Expr<NameIn<'int, Int>>;

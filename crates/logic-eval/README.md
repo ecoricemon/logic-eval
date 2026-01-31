@@ -1,7 +1,5 @@
 # logic-eval
 
-A simple logic evaluator.
-
 [![Crates.io][crates-badge]][crates-url]
 [![CI Status][ci-badge]][ci-url]
 [![Codecov][codecov-badge]][codecov-url]
@@ -12,6 +10,8 @@ A simple logic evaluator.
 [ci-url]: https://github.com/ecoricemon/logic-eval/actions/workflows/test.yml
 [codecov-badge]: https://codecov.io/gh/ecoricemon/logic-eval/graph/badge.svg?flag=logic-eval
 [codecov-url]: https://app.codecov.io/gh/ecoricemon/logic-eval?flags%5B0%5D=logic-eval
+
+A simple logic evaluator.
 
 ## Example
 

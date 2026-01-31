@@ -1,6 +1,6 @@
 use crate::{
-    PassThroughState,
     parse::repr::{Expr, Predicate, Term},
+    PassThroughState,
 };
 use fxhash::FxHasher;
 use indexmap::IndexMap;
@@ -1342,8 +1342,8 @@ fn buf_term_hash<T: Hash>(buf: &[TermElem<T>], id: TermId) -> u64 {
 mod tests {
     use super::*;
     use crate::{
-        Intern, TermStorageIn, UniqueTermArrayIn,
         parse::{self, text::Name},
+        Intern, TermStorageIn, UniqueTermArrayIn,
     };
     use any_intern::DroplessInterner;
 

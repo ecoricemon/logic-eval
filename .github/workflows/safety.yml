@@ -1,30 +1,38 @@
 # A Github Actions Workflow for Rust project
 #
-# This file was copied from "https://github.com/jonhoo/rust-ci-conf" then modified for this repo.
-#
 # This workflow runs checks for unsafe code. In crates that don't have any unsafe code, this can be
 # removed. Runs:
-# - address sanitizer - detects memory errors
-# - leak sanitizer - detects memory leaks
+# - sanitizers: detects memory errors and leaks
 # - miri - detects undefined behavior and memory leaks
+#
+# ref:
+# - https://github.com/jonhoo/rust-ci-conf
+
 name: safety
+
 permissions:
   contents: read
+
 on:
   push:
     branches: [main]
   pull_request:
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
+
+env:
+  rust_nightly: nightly-2026-01-30
+
 jobs:
   discover-crates:
-    name: discover / sub-crate
+    name: discover-crates
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.discover.outputs.matrix }}
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # tag=v6.0.1
+      - uses: actions/checkout@v6.0.1
         with:
           submodules: true
       - name: Discover sub-crates
@@ -35,14 +43,15 @@ jobs:
           # Convert to JSON array for matrix
           matrix_json=$(echo "$crates" | jq -R -s -c 'split("\n") | map(select(. != ""))')
           echo "matrix=$matrix_json" >> "$GITHUB_OUTPUT"
+
   discover-unsafe-crates:
-    name: discover / sub-crate / unsafe
+    name: discover-unsafe-crates
     runs-on: ubuntu-latest
     needs: discover-crates
     outputs:
       unsafe_crates: ${{ steps.discover-unsafe.outputs.unsafe_crates }}
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # tag=v6.0.1
+      - uses: actions/checkout@v6.0.1
         with:
           submodules: true
       - name: Check for unsafe code
@@ -67,21 +76,22 @@ jobs:
           # Convert the unsafe crates array to a properly formatted JSON array
           unsafe_crates_json=$(printf "[%s]" "$(IFS=,; echo "${unsafe_crates[*]}")")
           echo "unsafe_crates=$unsafe_crates_json" >> "$GITHUB_OUTPUT"
+
   sanitizers:
-    name: nightly / sanitizer
+    name: sanitizers
     runs-on: ubuntu-latest
     needs: discover-unsafe-crates
     strategy:
       matrix:
         crate: ${{ fromJson(needs.discover-unsafe-crates.outputs.unsafe_crates) }}
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # tag=v6.0.1
+      - uses: actions/checkout@v6.0.1
         with:
           submodules: true
-      - name: Install nightly
+      - name: Install Rust ${{ env.rust_nightly }}
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
         with:
-          toolchain: nightly
+          toolchain: ${{ env.rust_nightly }}
       - name: Enable debug symbols
         run: |
           # to get the symbolizer for debug symbol resolution
@@ -112,23 +122,22 @@ jobs:
           LSAN_OPTIONS: "suppressions=lsan-suppressions.txt"
           RUSTFLAGS: "-Z sanitizer=leak"
         working-directory: crates/${{ matrix.crate }}
+
   miri:
-    name: nightly / miri
+    name: miri
     runs-on: ubuntu-latest
     needs: discover-unsafe-crates
     strategy:
       matrix:
         crate: ${{ fromJson(needs.discover-unsafe-crates.outputs.unsafe_crates) }}
     steps:
-      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # tag=v6.0.1
+      - uses: actions/checkout@v6.0.1
         with:
           submodules: true
-      - run: |
-          echo "NIGHTLY=nightly-$(curl -s https://rust-lang.github.io/rustup-components-history/x86_64-unknown-linux-gnu/miri)" >> "$GITHUB_ENV"
-      - name: Install ${{ env.NIGHTLY }}
+      - name: Install Rust ${{ env.rust_nightly }}
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
         with:
-          toolchain: ${{ env.NIGHTLY }}
+          toolchain: ${{ env.rust_nightly }}
           components: miri
       - name: cargo miri test
         run: cargo miri test
