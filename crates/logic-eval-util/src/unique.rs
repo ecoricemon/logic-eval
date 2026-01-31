@@ -1,5 +1,5 @@
 use crate::Map;
-use smallvec::{SmallVec, smallvec};
+use smallvec::{smallvec, SmallVec};
 use std::{
     cell::Cell,
     hash::{DefaultHasher, Hash, Hasher},

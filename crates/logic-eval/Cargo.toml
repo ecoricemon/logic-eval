@@ -1,8 +1,8 @@
 [package]
 name = "logic-eval"
-version = "0.1.3"
-edition = "2024"
-rust-version = "1.89"
+version = "0.1.4"
+edition = "2021"
+rust-version = "1.65"
 description = "A simple logic evaluator"
 readme = "README.md"
 repository = "https://github.com/ecoricemon/logic-eval"

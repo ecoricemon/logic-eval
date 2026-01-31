@@ -64,7 +64,7 @@ impl<T: AsRef<str>> Display for Clause<T> {
 #[derive(Default, Clone, PartialEq, Eq)]
 pub struct Term<T> {
     pub functor: T,
-    pub args: Box<[Term<T>]>,
+    pub args: Vec<Term<T>>,
 }
 
 impl<T> Term<T> {

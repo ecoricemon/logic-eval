@@ -1,13 +1,15 @@
 use super::common::{self, Interned, RawInterned, UnsafeLock};
 use bumpalo::Bump;
-use hashbrown::{HashTable, hash_table::Entry};
+use hashbrown::{hash_table::Entry, HashTable};
 use std::{
     alloc::Layout,
     any::TypeId,
     borrow,
     cell::Cell,
+    hash::Hasher,
     hash::{BuildHasher, Hash},
-    mem, ptr,
+    mem,
+    ptr::NonNull,
 };
 
 /// A type-erased interner for storing and deduplicating values of a single type.
@@ -278,12 +280,12 @@ impl<S: BuildHasher> AnyInternSet<S> {
     }
 
     /// Returns number of values in the set.
-    pub const fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.arena.len()
     }
 
     /// Returns true if the set is empty.
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
@@ -459,7 +461,7 @@ impl<S: BuildHasher> AnyInternSet<S> {
     /// # Safety
     ///
     /// Undefined behavior if incorrect type `K` is given.
-    unsafe fn table_eq<K, Q>(key: &Q) -> impl FnMut(&RawInterned) -> bool
+    unsafe fn table_eq<'a, K, Q>(key: &'a Q) -> impl FnMut(&RawInterned) -> bool + 'a
     where
         K: borrow::Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -475,7 +477,7 @@ impl<S: BuildHasher> AnyInternSet<S> {
     /// # Safety
     ///
     /// Undefined behavior if incorrect type `K` is given.
-    unsafe fn table_hasher<K, Q>(hash_builder: &S) -> impl Fn(&RawInterned) -> u64
+    unsafe fn table_hasher<'a, K, Q>(hash_builder: &'a S) -> impl Fn(&RawInterned) -> u64 + 'a
     where
         K: borrow::Borrow<Q>,
         Q: Hash + Eq + ?Sized,
@@ -487,7 +489,9 @@ impl<S: BuildHasher> AnyInternSet<S> {
     }
 
     fn hash<K: Hash + ?Sized>(hash_builder: &S, value: &K) -> u64 {
-        hash_builder.hash_one(value)
+        let mut hasher = hash_builder.build_hasher();
+        value.hash(&mut hasher);
+        hasher.finish()
     }
 }
 
@@ -519,11 +523,11 @@ impl AnyArena {
     }
 
     /// Returns number of elements in this arena.
-    pub const fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.len.get()
     }
 
-    pub const fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
@@ -552,9 +556,11 @@ impl AnyArena {
                     }
                 }
             } else {
-                let ptr = ptr::dangling_mut::<u8>();
+                // ZST, but it has drop impl, which means the drop could have side effects, so we
+                // should call it.
+                let ptr = NonNull::<()>::dangling(); // aligned dangling pointer for ZST
                 unsafe {
-                    raw_drop_slice(ptr, self.len());
+                    raw_drop_slice(ptr.as_ptr().cast(), self.len());
                 }
             }
         }

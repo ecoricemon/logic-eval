@@ -1,9 +1,5 @@
 # any-intern
 
-`any-intern` is a Rust crate for efficient interning of values. It provides flexible interners for
-various use cases, ensuring that each unique value is stored only once, saving memory and improving
-lookup efficiency.
-
 [![Crates.io][crates-badge]][crates-url]
 [![CI Status][ci-badge]][ci-url]
 [![Codecov][codecov-badge]][codecov-url]
@@ -14,6 +10,10 @@ lookup efficiency.
 [ci-url]: https://github.com/ecoricemon/logic-eval/actions/workflows/test.yml
 [codecov-badge]: https://codecov.io/gh/ecoricemon/logic-eval/graph/badge.svg?flag=any-intern
 [codecov-url]: https://app.codecov.io/gh/ecoricemon/logic-eval?flags%5B0%5D=any-intern
+
+`any-intern` is a Rust crate for efficient interning of values. It provides flexible interners for
+various use cases, ensuring that each unique value is stored only once, saving memory and improving
+lookup efficiency.
 
 ## Examples
 

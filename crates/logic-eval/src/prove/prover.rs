@@ -3,12 +3,12 @@ use super::repr::{
     TermStorageLen, TermView, TermViewMut, UniqueTermArray,
 };
 use crate::{
-    ExprIn, Int2Name, Intern, Map, Name2Int, NameIn, TermIn,
     parse::{
-        VAR_PREFIX,
         repr::{Predicate, Term},
         text::Name,
+        VAR_PREFIX,
     },
+    ExprIn, Int2Name, Intern, Map, Name2Int, NameIn, TermIn,
 };
 use indexmap::IndexMap;
 use logic_eval_util::reference::Ref;
@@ -1024,7 +1024,7 @@ pub(crate) mod format {
             self.args().any(|arg| arg.contains(term))
         }
 
-        fn args(&self) -> impl Iterator<Item = Self> {
+        fn args<'s>(&'s self) -> impl Iterator<Item = Self> + 's {
             self.view.args().map(|arg| Self {
                 view: arg,
                 int2name: self.int2name,
