@@ -619,7 +619,7 @@ pub struct Assignment<'a, 'int, Int: Intern> {
     int2name: &'a Int2Name<'int, Int>,
 }
 
-impl<'a, 'int, Int: Intern> Assignment<'a, 'int, Int> {
+impl<'a, 'int: 'a, Int: Intern> Assignment<'a, 'int, Int> {
     /// Creates left hand side term of the assignment.
     ///
     /// To create a term, this method could allocate memory for the term.
@@ -1024,7 +1024,7 @@ pub(crate) mod format {
             self.args().any(|arg| arg.contains(term))
         }
 
-        fn args<'s>(&'s self) -> impl Iterator<Item = Self> + 's {
+        fn args<'s>(&'s self) -> impl Iterator<Item = NamedTermView<'a, 'int, Int>> + 's {
             self.view.args().map(|arg| Self {
                 view: arg,
                 int2name: self.int2name,

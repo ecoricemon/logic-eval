@@ -80,7 +80,7 @@ impl Database<'static> {
             trait NotClone { const IS_CLONE: bool = false; }
             impl<T> NotClone for ImplDetector<T> {}
             impl<T: Clone> ImplDetector<T> { const IS_CLONE: bool = true; }
-            const _: () = const { assert!(!ImplDetector::<Database<'static>>::IS_CLONE) };
+            const _: () = assert!(!ImplDetector::<Database<'static>>::IS_CLONE);
         }
 
         // Safety:

@@ -2,7 +2,8 @@ use crate::Map;
 use smallvec::{smallvec, SmallVec};
 use std::{
     cell::Cell,
-    hash::{DefaultHasher, Hash, Hasher},
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
     iter, mem, ops,
 };
 

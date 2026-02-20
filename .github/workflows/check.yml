@@ -4,6 +4,7 @@
 # several checks:
 # - fmt: checks that the code is formatted according to rustfmt
 # - clippy: checks that the code does not contain any clippy warnings
+# - msrv: checks that the msrv is correct.
 # - minimal-versions: checks that the code works with the minimal versions of dependencies.
 #
 # ref:
@@ -31,33 +32,13 @@ concurrency:
 
 env:
   rust_nightly: nightly-2026-01-30
+  rust_clippy: '1.93'
+  rust_min: '1.65'
 
 jobs:
-  discover-crates:
-    name: discover-crates
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.discover.outputs.matrix }}
-    steps:
-      - uses: actions/checkout@v6.0.1
-        with:
-          submodules: true
-      - name: Discover sub-crates
-        id: discover
-        run: |
-          # Get all directories under crates/ that have Cargo.toml
-          crates=$(find crates -maxdepth 2 -name "Cargo.toml" -exec dirname {} \; | xargs -I {} basename {})
-          # Convert to JSON array for matrix
-          matrix_json=$(echo "$crates" | jq -R -s -c 'split("\n") | map(select(. != ""))')
-          echo "matrix=$matrix_json" >> "$GITHUB_OUTPUT"
-
   fmt:
     name: fmt
     runs-on: ubuntu-latest
-    needs: discover-crates
-    strategy:
-      matrix:
-        crate: ${{ fromJson(needs.discover-crates.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v6.0.1
         with:
@@ -67,17 +48,12 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt
-      - name: cargo fmt --check in ${{ matrix.crate }}
-        run: cargo fmt --check
-        working-directory: crates/${{ matrix.crate }}
+      - name: cargo fmt --check
+        run: cargo fmt --check --all
 
   clippy:
     name: clippy
     runs-on: ubuntu-latest
-    needs: discover-crates
-    strategy:
-      matrix:
-        crate: ${{ fromJson(needs.discover-crates.outputs.matrix) }}
     permissions:
       contents: read
       checks: write
@@ -88,14 +64,33 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
         with:
-          toolchain: stable
+          toolchain: ${{ env.rust_clippy }}
           components: clippy
+      - uses: Swatinem/rust-cache@v2
       - name: cargo clippy
-        uses: giraffate/clippy-action@v1.0.1
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.1
         with:
-          reporter: 'github-pr-check'
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          workdir: crates/${{ matrix.crate }}
+          submodules: true
+      - name: Install Rust ${{ env.rust_nightly }}
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
+        with:
+          toolchain: ${{ env.rust_nightly }}
+      - name: Install Rust ${{ env.rust_min }}
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # branch=master
+        with:
+          toolchain: ${{ env.rust_min }}
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check
+        run: |
+          # Generate lock file with mimimal versions and check the MSRV
+          cargo +nightly update -Z minimal-versions
+          cargo +${{ env.rust_min }} check --locked --workspace
 
   minimal-versions:
     name: minimal-versions
@@ -112,7 +107,8 @@ jobs:
         uses: taiki-e/install-action@v2.67.17
         with:
           tool: cargo-hack
-      - name: "check -Z minimal-versions"
+      - uses: Swatinem/rust-cache@v2
+      - name: check -Z minimal-versions
         run: |
           # Remove dev-dependencies from Cargo.toml to prevent the next `cargo update` from
           # determining minimal versions based on dev-dependencies.

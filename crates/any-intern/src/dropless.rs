@@ -787,9 +787,9 @@ mod tests {
         let strs = (0..N).map(|i| (i * 10_000).to_string()).collect::<Vec<_>>();
 
         // Interns lots of items.
-        for i in 0..N {
+        for (i, str_) in strs.iter().enumerate().take(N) {
             let int = &(i as u32); // 4 bytes
-            let str_ = &*strs[i]; // greater than 4 btyes
+            let str_ = str_.as_str(); // greater than 4 btyes
             let bytes = &[i as u16]; // 2 bytes
             interned_int.push(interner.intern(int).erased_raw());
             interned_str.push(interner.intern(str_).erased_raw());
@@ -815,9 +815,9 @@ mod tests {
         assert_eq!(whole.len(), N * 3);
 
         // Verifies `get` method for every item.
-        for i in 0..N {
+        for (i, str_) in strs.iter().enumerate().take(N) {
             let int = &(i as u32); // 4 bytes
-            let str_ = &*strs[i]; // greater than 4 btyes
+            let str_ = str_.as_str(); // greater than 4 btyes
             let bytes = &[i as u16]; // 2 bytes
             assert_eq!(interner.get(int).as_deref(), Some(int));
             assert_eq!(interner.get(str_).as_deref(), Some(str_));
@@ -964,8 +964,6 @@ mod tests {
             let mut write_buf = buf.speculative_alloc(s.len());
             write_buf.write_str(&s).unwrap();
             assert_eq!(write_buf.as_bytes(), s.as_bytes());
-            drop(write_buf);
-
             assert_eq!(buf.chunks.len(), 1);
             assert_eq!(buf.last_chunk_start, 0);
         }

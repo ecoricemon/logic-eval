@@ -311,8 +311,8 @@ pub(crate) fn assert_group_addr_eq(groups: &[&[RawInterned]]) {
 
         // Groups have different addresses.
         let a = groups[i][0];
-        for j in i + 1..groups.len() {
-            let b = groups[j][0];
+        for group in groups.iter().skip(i + 1) {
+            let b = group[0];
             assert_ne!(a, b);
         }
     }
