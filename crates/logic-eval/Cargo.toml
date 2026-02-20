@@ -1,16 +1,13 @@
 [package]
 name = "logic-eval"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
-rust-version = "1.65"
+rust-version = "1.65.0"
 description = "A simple logic evaluator"
 readme = "README.md"
 repository = "https://github.com/ecoricemon/logic-eval"
 license = "Apache-2.0 OR MIT"
 keywords = ["logic"]
-
-[lib]
-crate-type = ["rlib"]
 
 [dependencies]
 any-intern = { workspace = true }

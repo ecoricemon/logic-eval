@@ -341,6 +341,7 @@ impl<S: Default> Default for Interner<S> {
 mod tests {
     use super::*;
     use crate::common::{self, RawInterned};
+    use std::mem;
 
     #[test]
     #[rustfmt::skip]
@@ -362,10 +363,11 @@ mod tests {
     // Address insdie Interned<'_, T> must be valid while the interner lives.
     #[test]
     fn test_fixed_memory_after_huge_number_of_interninig() {
-        #[cfg(not(miri))]
-        const TEST_SIZE_IN_BYTES: isize = 5 * 1024 * 1024; // 5 MB
-        #[cfg(miri)]
-        const TEST_SIZE_IN_BYTES: isize = 10 * 1024; // 10 KB
+        const TEST_SIZE_IN_BYTES: isize = if cfg!(miri) {
+            10 * 1024 /* 10 KB */
+        } else {
+            5 * 1024 * 1024 /* 5 MB */
+        };
 
         let interner = Interner::new();
 
@@ -390,7 +392,7 @@ mod tests {
             }
             let value = i.to_string();
             let value = value.as_str();
-            remain_bytes -= size_of_val(&value) as isize;
+            remain_bytes -= mem::size_of_val(value) as isize;
 
             let interned = interner.intern_dropless(value);
             interned_str.push(interned);
