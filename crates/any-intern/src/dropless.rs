@@ -567,12 +567,12 @@ impl<S: BuildHasher> DroplessInternSet<S> {
 /// A buffer for strings.
 #[derive(Debug, Default)]
 struct StringBuffer {
-    chunks: Vec<Box<[MaybeUninit<u8>]>>,
+    chunks: Vec<Vec<MaybeUninit<u8>>>,
     last_chunk_start: usize,
 }
 
 const INIT_CHUNK_SIZE: usize = 1 << 5;
-const GLOW_MAX_CHUNK_SIZE: usize = 1 << 12;
+const GROW_MAX_CHUNK_SIZE: usize = 1 << 12;
 
 impl StringBuffer {
     fn speculative_alloc(&mut self, upper_size: usize) -> StringWriteBuffer<'_> {
@@ -583,7 +583,7 @@ impl StringBuffer {
             }
             Some(last_chunk) if last_chunk.len() - self.last_chunk_start < upper_size => {
                 let chunk_size = (last_chunk.len() * 2)
-                    .min(GLOW_MAX_CHUNK_SIZE)
+                    .min(GROW_MAX_CHUNK_SIZE)
                     .max(upper_size.next_power_of_two());
                 self.append_new_chunk(chunk_size);
             }
@@ -591,13 +591,13 @@ impl StringBuffer {
         }
 
         // Safety: We added the last chunk above.
-        let last_chunk = unsafe { self.chunks.last_mut().unwrap_unchecked() };
-
-        let start = self.last_chunk_start;
-        let end = self.last_chunk_start + upper_size;
-        let buf = &mut last_chunk[start..end];
+        let buf = unsafe {
+            let last_chunk = self.chunks.last_mut().unwrap_unchecked();
+            last_chunk.as_mut_ptr().add(self.last_chunk_start)
+        };
         StringWriteBuffer {
             buf,
+            buf_cap: upper_size,
             last_chuck_start: &mut self.last_chunk_start,
             written: 0,
         }
@@ -610,13 +610,14 @@ impl StringBuffer {
         // Safety: We reserved enough amount of memory, also it can contain uninitialized data.
         unsafe { chunk.set_len(chunk_size) };
 
-        self.chunks.push(chunk.into_boxed_slice());
+        self.chunks.push(chunk);
         self.last_chunk_start = 0;
     }
 }
 
 struct StringWriteBuffer<'a> {
-    buf: &'a mut [MaybeUninit<u8>],
+    buf: *mut MaybeUninit<u8>,
+    buf_cap: usize,
     last_chuck_start: &'a mut usize,
     written: usize,
 }
@@ -624,16 +625,18 @@ struct StringWriteBuffer<'a> {
 impl<'a> StringWriteBuffer<'a> {
     #[inline]
     fn as_bytes(&self) -> &[u8] {
-        let ptr = self.buf.as_ptr().cast::<u8>();
-        unsafe { slice::from_raw_parts(ptr, self.written) }
+        // Safety: bytes 0..written were initialized by write_str.
+        unsafe { slice::from_raw_parts(self.buf.cast::<u8>(), self.written) }
     }
 
     #[inline]
     fn commit(self) -> &'a [u8] {
         *self.last_chuck_start += self.written;
 
-        let ptr = self.buf.as_ptr().cast::<u8>();
-        unsafe { slice::from_raw_parts(ptr, self.written) }
+        // Safety: bytes 0..written were initialized by write_str.
+        // The lifetime 'a is valid because buf points into a Vec owned by the StringBuffer that is
+        // mutably borrowed for 'a (evidenced by last_chuck_start: &'a mut usize).
+        unsafe { slice::from_raw_parts(self.buf.cast::<u8>(), self.written) }
     }
 }
 
@@ -641,18 +644,16 @@ impl Write for StringWriteBuffer<'_> {
     fn write_str(&mut self, s: &str) -> std::fmt::Result {
         let size = s.len();
 
-        if self.buf.len() - self.written >= size {
+        if self.buf_cap - self.written >= size {
             let src = s.as_ptr();
-
-            // Safety: `written` cannot be over the buf size by the if condition
-            let buf = unsafe { self.buf.get_unchecked_mut(self.written..) };
-            let dst = buf.as_mut_ptr().cast::<u8>();
 
             // Safety
             // * `src` is valid for reading of `size` bytes
-            // * `dst` is valid for reading of `size` bytes
-            // * Two pointers are well aligned. Both alignments are 1
-            // * `src` and `dst` are not overlapping
+            // * `dst` is valid for writing of `size` bytes
+            //   (`written + size <= buf_cap <= chunk len`)
+            // * Both alignments are 1
+            // * `src` and `dst` are not overlapping (src is a string literal / caller data)
+            let dst = unsafe { self.buf.add(self.written).cast::<u8>() };
             unsafe { ptr::copy_nonoverlapping(src, dst, size) };
 
             self.written += size;
@@ -694,6 +695,7 @@ mod tests {
         test_dropless_interner_many();
         test_dropless_interner_alignment_handling();
         test_dropless_interner_complex_display_type();
+        test_dropless_interner_consecutive_formatted_strs();
     }
 
     fn test_dropless_interner_int() {
@@ -914,6 +916,20 @@ mod tests {
         assert_eq!(&*interned, s.as_str());
     }
 
+    // UB if the interner gets a mutable reference to a whole chunk while a reference(i0) is alive.
+    fn test_dropless_interner_consecutive_formatted_strs() {
+        let dropless = DroplessInterner::new();
+
+        let value = 0;
+        let i1 = dropless.intern_formatted_str(&value, 1).unwrap();
+
+        let value = 1;
+        let i2 = dropless.intern_formatted_str(&value, 1).unwrap();
+
+        // Prevents i1 and i2 from being optimized away.
+        let _c = format!("{i1}{i2}");
+    }
+
     #[test]
     fn test_string_buffer() {
         test_string_buffer_chunk();
@@ -946,7 +962,7 @@ mod tests {
         assert_eq!(buf.last_chunk_start, 1);
 
         // Forces to make another chunk
-        let mut write_buf = buf.speculative_alloc(GLOW_MAX_CHUNK_SIZE);
+        let mut write_buf = buf.speculative_alloc(GROW_MAX_CHUNK_SIZE);
         write_buf.write_str("aa").unwrap();
         assert_eq!(write_buf.as_bytes(), b"aa");
         write_buf.commit();
@@ -986,7 +1002,7 @@ mod tests {
     fn test_string_buffer_long_string() {
         let mut buf = StringBuffer::default();
 
-        let s = "a".repeat(GLOW_MAX_CHUNK_SIZE * 10);
+        let s = "a".repeat(GROW_MAX_CHUNK_SIZE * 10);
         let mut write_buf = buf.speculative_alloc(s.len());
         write_buf.write_str(&s).unwrap();
         assert_eq!(write_buf.as_bytes(), s.as_bytes());
