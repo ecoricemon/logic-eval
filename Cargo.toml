@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.dependencies]
-any-intern = { version = "0.1.4", path = "crates/any-intern" }
+any-intern = { version = "0.1.5", path = "crates/any-intern" }
 logic-eval-util = { version = "0.1.5", path = "crates/logic-eval-util" }
 indexmap = "2.2.1"
 smallvec = "1"
