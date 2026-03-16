@@ -6,7 +6,7 @@ members = ["crates/*"]
 any-intern = { version = "0.1.5", path = "crates/any-intern" }
 logic-eval-util = { version = "0.1.5", path = "crates/logic-eval-util" }
 indexmap = "2.2.1"
-smallvec = "1"
+smallvec = "1.15.1"
 bumpalo = "3.10"
 fxhash = "0.2.1"
 hashbrown = "0.16.1"

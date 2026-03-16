@@ -3,23 +3,17 @@ use super::repr::{
     TermStorageLen, TermView, TermViewMut, UniqueTermArray,
 };
 use crate::{
-    parse::{
-        repr::{Predicate, Term},
-        text::Name,
-        VAR_PREFIX,
-    },
-    ExprIn, Int2Name, Intern, Map, Name2Int, NameIn, TermIn,
+    parse::repr::{Expr, Predicate, Term},
+    Atom, Map, VAR_PREFIX,
 };
-use indexmap::IndexMap;
-use logic_eval_util::reference::Ref;
-use std::{
-    borrow::Borrow,
-    collections::VecDeque,
-    fmt::{self, Debug, Write},
+use core::{
+    fmt::{self, Debug, Display, Write},
     hash::Hash,
     iter,
     ops::{self, Range},
 };
+use indexmap::IndexMap;
+use std::collections::VecDeque;
 
 pub(crate) type ClauseMap = IndexMap<Predicate<Integer>, Vec<ClauseId>>;
 
@@ -32,9 +26,8 @@ pub(crate) struct Prover {
 
     /// Variable assignments.
     ///
-    /// For example, `assignment[X] = a` means that `X(term id)` is assigned to
-    /// `a(term id)`. If a value is identical to its index, it means the term is
-    /// not assigned to anything.
+    /// For example, `assignment[X] = a` means that `X(term id)` is assigned to `a(term id)`. If a
+    /// value is identical to its index, it means the term is not assigned to anything.
     assignments: Vec<usize>,
 
     /// A given query.
@@ -50,12 +43,11 @@ pub(crate) struct Prover {
 
     /// A buffer containing mapping between variables and temporary variables.
     ///
-    /// This buffer is used when we convert variables into temporary variables
-    /// for a clause. After the conversion, this buffer get empty.
+    /// This buffer is used when we convert variables into temporary variables for a clause. After
+    /// the conversion, this buffer get empty.
     temp_var_buf: Map<TermId, TermId>,
 
-    /// A monotonically increasing integer that is used for generating
-    /// temporary variables.
+    /// A monotonically increasing integer that is used for generating temporary variables.
     temp_var_int: u32,
 }
 
@@ -81,13 +73,13 @@ impl Prover {
         self.queue.clear();
     }
 
-    pub(crate) fn prove<'a, 'int, Int: Intern>(
+    pub(crate) fn prove<'a, T: Atom>(
         &'a mut self,
-        query: ExprIn<'int, Int>,
+        query: Expr<T>,
         clause_map: &'a ClauseMap,
         stor: &'a mut TermStorage<Integer>,
-        nimap: &'a mut NameIntMap<'int, Int>,
-    ) -> ProveCx<'a, 'int, Int> {
+        nimap: &'a mut NameIntMap<T>,
+    ) -> ProveCx<'a, T> {
         self.clear();
 
         let old_nimap_state = nimap.state();
@@ -111,12 +103,12 @@ impl Prover {
         ProveCx::new(self, clause_map, stor, nimap, old_stor_len, old_nimap_state)
     }
 
-    /// Evaluates the given node with all possible clauses in the clause
-    /// dataset, then returns whether a proof search path is complete or not.
+    /// Evaluates the given node with all possible clauses in the clause dataset, then returns
+    /// whether a proof search path is complete or not.
     ///
-    /// If it reached an end of paths, it returns proof search result within
-    /// `Some`. The proof search result is either true or false, which means
-    /// the expression in the given node is true or not.
+    /// If it reached an end of paths, it returns proof search result within `Some`. The proof
+    /// search result is either true or false, which means the expression in the given node is true
+    /// or not.
     fn evaluate_node(
         &mut self,
         node_index: usize,
@@ -159,11 +151,10 @@ impl Prover {
             }
         }
 
-        // We may need to apply true or false to the leftmost term of the node
-        // expression due to unification failure or exhaustive search.
+        // We may need to apply true or false to the leftmost term of the node expression due to
+        // unification failure or exhaustive search.
         // - Unification failure means the leftmost term should be false.
-        // - But we need to consider exhaustive search possibility at the same
-        //   time.
+        // - But we need to consider exhaustive search possibility at the same time.
 
         let expr = stor.get_expr(node_expr);
         let eval = self.nodes.len() > old_len;
@@ -198,16 +189,14 @@ impl Prover {
         // === Internal helper functions ===
 
         enum AssumeResult {
-            /// The whole expression could not completely evaluated even though
-            /// the assumption is realized.
+            /// The whole expression could not completely evaluated even though the assumption is
+            /// realized.
             Incomplete {
-                /// Whether or not the assumption will make us lose some search
-                /// possibilities.
+                /// Whether or not the assumption will make us lose some search possibilities.
                 lost: bool,
             },
 
-            /// The whole expression will be completely evaluated if the
-            /// assumption is realized.
+            /// The whole expression will be completely evaluated if the assumption is realized.
             Complete {
                 /// Evalauted as true or false.
                 eval: bool,
@@ -228,9 +217,9 @@ impl Prover {
                     }
                 },
                 ExprKind::And(mut args) => {
-                    // Unlike 'Or', even if 'And' contains variables and the
-                    // whole expression will be evaluated false, those variables
-                    // must be ignored. They don't belong to 'lost'.
+                    // Unlike 'Or', even if 'And' contains variables and the whole expression will
+                    // be evaluated false, those variables must be ignored. They don't belong to
+                    // 'lost'.
                     match assume_leftmost_term(args.next().unwrap(), to) {
                         res @ AssumeResult::Incomplete { .. } => res,
                         AssumeResult::Complete { eval, lost } => {
@@ -243,9 +232,8 @@ impl Prover {
                     }
                 }
                 ExprKind::Or(mut args) => {
-                    // The whole 'Or' is true if any argument is true. But we
-                    // will lose possible search paths if we ignore right
-                    // variables.
+                    // The whole 'Or' is true if any argument is true. But we will lose possible
+                    // search paths if we ignore right variables.
                     match assume_leftmost_term(args.next().unwrap(), to) {
                         res @ AssumeResult::Incomplete { .. } => res,
                         AssumeResult::Complete { eval, lost } => {
@@ -266,15 +254,14 @@ impl Prover {
     }
 
     /// Replaces variables in a clause with other temporary variables.
-    ///
-    // Why we replace variables with temporary variables in clauses before
-    // unifying?
-    // 1. That's because variables in different clauses are actually different
-    // from each other even they have the same identity. Variable's identity
-    // is valid only in the one clause where they belong.
-    // 2. Also, we apply this method whenever unification happens because one
-    // clause can be used mupltiple times in a single proof search path. Then
-    // it is considered as a different clause.
+    //
+    // Why we replace variables with temporary variables in clauses before unifying?
+    // 1. That's because variables in different clauses are actually different from each other even
+    //    they have the same identity. Variable's identity is valid only in the one clause where
+    //    they belong.
+    // 2. Also, we apply this method whenever unification happens because one clause can be used
+    //    mupltiple times in a single proof search path. Then it is considered as a different
+    //    clause.
     fn convert_var_into_temp(
         mut clause_id: ClauseId,
         stor: &mut TermStorage<Integer>,
@@ -417,8 +404,8 @@ struct UnificationOperator {
 
     /// History of unification.
     ///
-    /// A pair of term ids means that `pair.0` is assiend to `pair.1`. For
-    /// example, `(X, a)` means `X` is assigned to `a`.
+    /// A pair of term ids means that `pair.0` is assiend to `pair.1`. For example, `(X, a)` means
+    /// `X` is assigned to `a`.
     record: Vec<(TermId, TermId)>,
 }
 
@@ -486,8 +473,7 @@ struct Node {
 
 #[derive(Debug, Clone, Copy)]
 enum NodeKind {
-    /// A non-terminal node containig an expression id that needs to be
-    /// evaluated.
+    /// A non-terminal node containig an expression id that needs to be evaluated.
     Expr(ExprId),
 
     /// A terminal node containing whether a proof path ends with true or false.
@@ -500,21 +486,21 @@ enum UnifyOp {
     Right { from: TermId, to: TermId },
 }
 
-pub struct ProveCx<'a, 'int, Int: Intern> {
+pub struct ProveCx<'a, T: Atom> {
     prover: &'a mut Prover,
     clause_map: &'a ClauseMap,
     stor: &'a mut TermStorage<Integer>,
-    nimap: &'a mut NameIntMap<'int, Int>,
+    nimap: &'a mut NameIntMap<T>,
     old_stor_len: TermStorageLen,
     old_nimap_state: NameIntMapState,
 }
 
-impl<'a, 'int, Int: Intern> ProveCx<'a, 'int, Int> {
+impl<'a, T: Atom> ProveCx<'a, T> {
     fn new(
         prover: &'a mut Prover,
         clause_map: &'a ClauseMap,
         stor: &'a mut TermStorage<Integer>,
-        nimap: &'a mut NameIntMap<'int, Int>,
+        nimap: &'a mut NameIntMap<T>,
         old_stor_len: TermStorageLen,
         old_nimap_state: NameIntMapState,
     ) -> Self {
@@ -528,7 +514,7 @@ impl<'a, 'int, Int: Intern> ProveCx<'a, 'int, Int> {
         }
     }
 
-    pub fn prove_next(&mut self) -> Option<EvalView<'_, 'int, Int>> {
+    pub fn prove_next(&mut self) -> Option<EvalView<'_, T>> {
         while let Some(node_index) = self.prover.queue.pop_front() {
             if let Some(proof_result) =
                 self.prover
@@ -555,32 +541,32 @@ impl<'a, 'int, Int: Intern> ProveCx<'a, 'int, Int> {
     }
 }
 
-impl<Int: Intern> Drop for ProveCx<'_, '_, Int> {
+impl<T: Atom> Drop for ProveCx<'_, T> {
     fn drop(&mut self) {
         self.stor.truncate(self.old_stor_len.clone());
         self.nimap.revert(self.old_nimap_state.clone());
     }
 }
 
-pub struct EvalView<'a, 'int, Int: Intern> {
+pub struct EvalView<'a, T> {
     query_vars: &'a [TermId],
     terms: &'a [TermElem<Integer>],
     assignments: &'a [usize],
-    int2name: &'a Int2Name<'int, Int>,
+    int2name: &'a IndexMap<Integer, T>,
     /// Inclusive
     start: usize,
     /// Exclusive
     end: usize,
 }
 
-impl<Int: Intern> EvalView<'_, '_, Int> {
+impl<T> EvalView<'_, T> {
     const fn len(&self) -> usize {
         self.end - self.start
     }
 }
 
-impl<'a, 'int, Int: Intern> Iterator for EvalView<'a, 'int, Int> {
-    type Item = Assignment<'a, 'int, Int>;
+impl<'a, T> Iterator for EvalView<'a, T> {
+    type Item = Assignment<'a, T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.start < self.end {
@@ -604,57 +590,52 @@ impl<'a, 'int, Int: Intern> Iterator for EvalView<'a, 'int, Int> {
     }
 }
 
-impl<Int: Intern> ExactSizeIterator for EvalView<'_, '_, Int> {
+impl<T> ExactSizeIterator for EvalView<'_, T> {
     fn len(&self) -> usize {
         <Self>::len(self)
     }
 }
 
-impl<Int: Intern> iter::FusedIterator for EvalView<'_, '_, Int> {}
+impl<T> iter::FusedIterator for EvalView<'_, T> {}
 
-pub struct Assignment<'a, 'int, Int: Intern> {
+pub struct Assignment<'a, T> {
     buf: &'a [TermElem<Integer>],
     from: TermId,
     assignments: &'a [usize],
-    int2name: &'a Int2Name<'int, Int>,
+    int2name: &'a IndexMap<Integer, T>,
 }
 
-impl<'a, 'int: 'a, Int: Intern> Assignment<'a, 'int, Int> {
+impl<'a, T: Atom + 'a> Assignment<'a, T> {
     /// Creates left hand side term of the assignment.
     ///
     /// To create a term, this method could allocate memory for the term.
-    pub fn lhs(&self) -> TermIn<'int, Int> {
+    pub fn lhs(&self) -> Term<T> {
         Self::term_view_to_term(self.lhs_view(), self.int2name)
     }
 
     /// Creates right hand side term of the assignment.
     ///
     /// To create a term, this method could allocate memory for the term.
-    pub fn rhs(&self) -> TermIn<'int, Int> {
+    pub fn rhs(&self) -> Term<T> {
         Self::term_deep_view_to_term(self.rhs_view(), self.int2name)
     }
 
     /// Returns left hand side variable name of the assignment.
     ///
     /// Note that assignment's left hand side is always variable.
-    pub fn get_lhs_variable(&self) -> &NameIn<'int, Int> {
+    pub fn get_lhs_variable(&self) -> &T {
         let int = self.lhs_view().get_contained_variable().unwrap();
         self.int2name.get(&int).unwrap()
     }
 
-    fn term_view_to_term(
-        view: TermView<'_, Integer>,
-        int2name: &Int2Name<'int, Int>,
-    ) -> TermIn<'int, Int> {
+    fn term_view_to_term(view: TermView<'_, Integer>, int2name: &IndexMap<Integer, T>) -> Term<T> {
         let functor = view.functor();
         let args = view.args();
 
         let functor = if let Some(name) = int2name.get(functor) {
             name.clone()
         } else {
-            let mut debug_string = String::new();
-            write!(&mut debug_string, "{:?}", functor).unwrap();
-            Name::with_intern(&debug_string, int2name.interner())
+            unreachable!("integer {:?} has no name mapping", functor)
         };
 
         let args = args
@@ -667,17 +648,15 @@ impl<'a, 'int: 'a, Int: Intern> Assignment<'a, 'int, Int> {
 
     fn term_deep_view_to_term(
         view: TermDeepView<'_, Integer>,
-        int2name: &Int2Name<'int, Int>,
-    ) -> TermIn<'int, Int> {
+        int2name: &IndexMap<Integer, T>,
+    ) -> Term<T> {
         let functor = view.functor();
         let args = view.args();
 
         let functor = if let Some(name) = int2name.get(functor) {
             name.clone()
         } else {
-            let mut debug_string = String::new();
-            write!(&mut debug_string, "{:?}", functor).unwrap();
-            Name::with_intern(&debug_string, int2name.interner())
+            unreachable!("integer {:?} has no name mapping", functor)
         };
 
         let args = args
@@ -704,19 +683,19 @@ impl<'a, 'int: 'a, Int: Intern> Assignment<'a, 'int, Int> {
     }
 }
 
-impl<Int: Intern> fmt::Display for Assignment<'_, '_, Int> {
+impl<T: Atom + Display> Display for Assignment<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let view = format::NamedTermView::new(self.lhs_view(), self.int2name);
-        fmt::Display::fmt(&view, f)?;
+        Display::fmt(&view, f)?;
 
         f.write_str(" = ")?;
 
         let view = format::NamedTermDeepView::new(self.rhs_view(), self.int2name);
-        fmt::Display::fmt(&view, f)
+        Display::fmt(&view, f)
     }
 }
 
-impl<Int: Intern> fmt::Debug for Assignment<'_, '_, Int> {
+impl<T: Atom + Debug> Debug for Assignment<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let lhs = format::NamedTermView::new(self.lhs_view(), self.int2name);
         let rhs = format::NamedTermDeepView::new(self.rhs_view(), self.int2name);
@@ -842,7 +821,7 @@ impl Integer {
     const VAR_FLAG: u32 = 0x1 << 31;
     const TEMPORARY_FLAG: u32 = 0x1 << 30;
 
-    pub(crate) fn from_text<T: AsRef<str>>(s: &Name<T>, mut index: u32) -> Self {
+    pub(crate) fn from_value<T: Atom>(s: &T, mut index: u32) -> Self {
         if s.is_variable() {
             index |= Self::VAR_FLAG;
         }
@@ -874,7 +853,7 @@ impl Debug for Integer {
         if self.is_temporary_variable() {
             f.write_char('#')?;
         }
-        index.fmt(f)
+        Debug::fmt(&index, f)
     }
 }
 
@@ -884,29 +863,38 @@ impl ops::AddAssign<u32> for Integer {
     }
 }
 
-/// Only mapping of user-input clauses and queries are stored in this map.
-/// Auto-generated variables or something like that are not stored here.
-#[derive(Debug)]
-pub(crate) struct NameIntMap<'int, Int: Intern> {
-    pub(crate) name2int: Name2Int<'int, Int>,
-    pub(crate) int2name: Int2Name<'int, Int>,
+/// Only mapping of user-input clauses and queries are stored in this map. Auto-generated variables
+/// or something like that are not stored here.
+pub(crate) struct NameIntMap<T> {
+    pub(crate) name2int: IndexMap<T, Integer>,
+    pub(crate) int2name: IndexMap<Integer, T>,
     next_int: u32,
 }
 
-impl<'int, Int: Intern> NameIntMap<'int, Int> {
-    pub(crate) fn new(interner: Ref<'int, Int>) -> Self {
+impl<T: Debug> fmt::Debug for NameIntMap<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NameIntMap")
+            .field("name2int", &self.name2int)
+            .field("int2name", &self.int2name)
+            .field("next_int", &self.next_int)
+            .finish()
+    }
+}
+
+impl<T: Atom> NameIntMap<T> {
+    pub(crate) fn new() -> Self {
         Self {
-            name2int: IdxMap::new(interner),
-            int2name: IdxMap::new(interner),
+            name2int: IndexMap::default(),
+            int2name: IndexMap::default(),
             next_int: 0,
         }
     }
 
-    pub(crate) fn name_to_int(&mut self, name: NameIn<'int, Int>) -> Integer {
+    pub(crate) fn name_to_int(&mut self, name: T) -> Integer {
         if let Some(int) = self.name2int.get(&name) {
             *int
         } else {
-            let int = Integer::from_text(&name, self.next_int);
+            let int = Integer::from_value(&name, self.next_int);
 
             self.name2int.insert(name.clone(), int);
             self.int2name.insert(int, name);
@@ -938,48 +926,6 @@ impl<'int, Int: Intern> NameIntMap<'int, Int> {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct IdxMap<'int, K, V, Int> {
-    map: IndexMap<K, V>,
-    pub(crate) interner: Ref<'int, Int>,
-}
-
-impl<'int, K, V, Int> IdxMap<'int, K, V, Int> {
-    pub(crate) fn new(interner: Ref<'int, Int>) -> Self {
-        Self {
-            map: IndexMap::default(),
-            interner,
-        }
-    }
-
-    pub(crate) fn interner(&self) -> &'int Int {
-        self.interner.as_ref()
-    }
-
-    pub(crate) fn len(&self) -> usize {
-        self.map.len()
-    }
-
-    pub(crate) fn truncate(&mut self, len: usize) {
-        self.map.truncate(len);
-    }
-
-    pub(crate) fn get<Q>(&self, key: &Q) -> Option<&V>
-    where
-        K: Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        self.map.get(key)
-    }
-
-    pub(crate) fn insert(&mut self, key: K, value: V) -> Option<V>
-    where
-        K: Hash + Eq,
-    {
-        self.map.insert(key, value)
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NameIntMapState {
     name2int_len: usize,
@@ -990,20 +936,20 @@ pub(crate) struct NameIntMapState {
 pub(crate) mod format {
     use super::*;
 
-    pub struct NamedTermView<'a, 'int, Int: Intern> {
+    pub struct NamedTermView<'a, T> {
         view: TermView<'a, Integer>,
-        int2name: &'a Int2Name<'int, Int>,
+        int2name: &'a IndexMap<Integer, T>,
     }
 
-    impl<'a, 'int, Int: Intern> NamedTermView<'a, 'int, Int> {
+    impl<'a, T: Atom> NamedTermView<'a, T> {
         pub(crate) const fn new(
             view: TermView<'a, Integer>,
-            int2name: &'a Int2Name<'int, Int>,
+            int2name: &'a IndexMap<Integer, T>,
         ) -> Self {
             Self { view, int2name }
         }
 
-        pub fn is(&self, term: &TermIn<'int, Int>) -> bool {
+        pub fn is(&self, term: &Term<T>) -> bool {
             let functor = self.view.functor();
             let Some(functor) = self.int2name.get(functor) else {
                 return false;
@@ -1016,7 +962,7 @@ pub(crate) mod format {
             self.args().zip(&term.args).all(|(l, r)| l.is(r))
         }
 
-        pub fn contains(&self, term: &TermIn<'int, Int>) -> bool {
+        pub fn contains(&self, term: &Term<T>) -> bool {
             if self.is(term) {
                 return true;
             }
@@ -1024,7 +970,7 @@ pub(crate) mod format {
             self.args().any(|arg| arg.contains(term))
         }
 
-        fn args<'s>(&'s self) -> impl Iterator<Item = NamedTermView<'a, 'int, Int>> + 's {
+        fn args<'s>(&'s self) -> impl Iterator<Item = NamedTermView<'a, T>> + 's {
             self.view.args().map(|arg| Self {
                 view: arg,
                 int2name: self.int2name,
@@ -1032,7 +978,7 @@ pub(crate) mod format {
         }
     }
 
-    impl<'a, 'int, Int: Intern> fmt::Display for NamedTermView<'a, 'int, Int> {
+    impl<'a, T: Atom + Display> Display for NamedTermView<'a, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             let Self { view, int2name } = self;
 
@@ -1056,7 +1002,7 @@ pub(crate) mod format {
         }
     }
 
-    impl<'a, 'int, Int: Intern> fmt::Debug for NamedTermView<'a, 'int, Int> {
+    impl<'a, T: Atom + Debug> Debug for NamedTermView<'a, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             let Self { view, int2name } = self;
 
@@ -1065,15 +1011,18 @@ pub(crate) mod format {
             let num_args = args.len();
 
             if num_args == 0 {
-                write_int(functor, int2name, f)
-            } else {
-                let mut d = if let Some(name) = int2name.get(functor) {
-                    f.debug_tuple(name.as_ref())
+                if let Some(name) = int2name.get(functor) {
+                    fmt::Debug::fmt(name, f)
                 } else {
-                    let mut debug_string = String::new();
-                    write!(&mut debug_string, "{:?}", functor)?;
-                    f.debug_tuple(&debug_string)
+                    fmt::Debug::fmt(functor, f)
+                }
+            } else {
+                let name_str = if let Some(name) = int2name.get(functor) {
+                    format!("{:?}", name)
+                } else {
+                    format!("{:?}", functor)
                 };
+                let mut d = f.debug_tuple(&name_str);
 
                 for arg in args {
                     d.field(&Self::new(arg, int2name));
@@ -1083,21 +1032,21 @@ pub(crate) mod format {
         }
     }
 
-    pub(crate) struct NamedTermDeepView<'a, 'int, Int: Intern> {
+    pub(crate) struct NamedTermDeepView<'a, T> {
         view: TermDeepView<'a, Integer>,
-        int2name: &'a Int2Name<'int, Int>,
+        int2name: &'a IndexMap<Integer, T>,
     }
 
-    impl<'a, 'int, Int: Intern> NamedTermDeepView<'a, 'int, Int> {
+    impl<'a, T> NamedTermDeepView<'a, T> {
         pub(crate) const fn new(
             view: TermDeepView<'a, Integer>,
-            int2name: &'a Int2Name<'int, Int>,
+            int2name: &'a IndexMap<Integer, T>,
         ) -> Self {
             Self { view, int2name }
         }
     }
 
-    impl<'a, 'int, Int: Intern> fmt::Display for NamedTermDeepView<'a, 'int, Int> {
+    impl<'a, T: Display> Display for NamedTermDeepView<'a, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             let Self { view, int2name } = self;
 
@@ -1121,7 +1070,7 @@ pub(crate) mod format {
         }
     }
 
-    impl<'a, 'int, Int: Intern> fmt::Debug for NamedTermDeepView<'a, 'int, Int> {
+    impl<'a, T: Debug> Debug for NamedTermDeepView<'a, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             let Self { view, int2name } = self;
 
@@ -1130,15 +1079,18 @@ pub(crate) mod format {
             let num_args = args.len();
 
             if num_args == 0 {
-                write_int(functor, int2name, f)
-            } else {
-                let mut d = if let Some(name) = int2name.get(functor) {
-                    f.debug_tuple(name.as_ref())
+                if let Some(name) = int2name.get(functor) {
+                    fmt::Debug::fmt(name, f)
                 } else {
-                    let mut debug_string = String::new();
-                    write!(&mut debug_string, "{:?}", functor)?;
-                    f.debug_tuple(&debug_string)
+                    fmt::Debug::fmt(functor, f)
+                }
+            } else {
+                let name_str = if let Some(name) = int2name.get(functor) {
+                    format!("{:?}", name)
+                } else {
+                    format!("{:?}", functor)
                 };
+                let mut d = f.debug_tuple(&name_str);
 
                 for arg in args {
                     d.field(&Self::new(arg, int2name));
@@ -1148,20 +1100,20 @@ pub(crate) mod format {
         }
     }
 
-    pub struct NamedExprView<'a, 'int, Int: Intern> {
+    pub struct NamedExprView<'a, T> {
         view: ExprView<'a, Integer>,
-        int2name: &'a Int2Name<'int, Int>,
+        int2name: &'a IndexMap<Integer, T>,
     }
 
-    impl<'a, 'int, Int: Intern> NamedExprView<'a, 'int, Int> {
+    impl<'a, T: Atom> NamedExprView<'a, T> {
         pub(crate) const fn new(
             view: ExprView<'a, Integer>,
-            int2name: &'a Int2Name<'int, Int>,
+            int2name: &'a IndexMap<Integer, T>,
         ) -> Self {
             Self { view, int2name }
         }
 
-        pub fn contains_term(&self, term: &TermIn<'int, Int>) -> bool {
+        pub fn contains_term(&self, term: &Term<T>) -> bool {
             match self.view.as_kind() {
                 ExprKind::Term(view) => NamedTermView {
                     view,
@@ -1184,7 +1136,7 @@ pub(crate) mod format {
         }
     }
 
-    impl<'a, 'int, Int: Intern> fmt::Display for NamedExprView<'a, 'int, Int> {
+    impl<'a, T: Atom + Display> Display for NamedExprView<'a, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             let Self { view, int2name } = self;
 
@@ -1235,7 +1187,7 @@ pub(crate) mod format {
         }
     }
 
-    impl<'a, 'int, Int: Intern> fmt::Debug for NamedExprView<'a, 'int, Int> {
+    impl<'a, T: Atom + Debug> Debug for NamedExprView<'a, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             let Self { view, int2name } = self;
 
@@ -1263,13 +1215,13 @@ pub(crate) mod format {
         }
     }
 
-    fn write_int<'int, Int: Intern>(
+    fn write_int<T: fmt::Display>(
         int: &Integer,
-        map: &Int2Name<'int, Int>,
+        map: &IndexMap<Integer, T>,
         f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
         if let Some(name) = map.get(int) {
-            f.write_str(name.as_ref())
+            fmt::Display::fmt(name, f)
         } else {
             fmt::Debug::fmt(int, f)
         }

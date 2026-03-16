@@ -1,9 +1,9 @@
 use super::{
-    repr::{Clause, Expr, Term},
+    repr::{Clause, ClauseDataset, Expr, Term},
     CloseParenToken, CommaToken, DotToken, HornToken, Ident, NegationToken, OpenParenToken, Parse,
-    ParseBuffer, VAR_PREFIX,
+    ParseBuffer,
 };
-use crate::{ClauseDatasetIn, ClauseIn, Error, ExprIn, Intern, NameIn, Result, TermIn};
+use crate::{Atom, ClauseDatasetIn, ClauseIn, Error, ExprIn, Intern, NameIn, Result, TermIn};
 use std::{
     borrow::Borrow,
     fmt::{self, Debug, Display},
@@ -13,25 +13,24 @@ use std::{
 
 impl<'int, Int: Intern> Parse<'int, Int> for ClauseDatasetIn<'int, Int> {
     fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self> {
-        let clauses = buf.parse(interner)?;
-        Ok(Self(clauses))
-    }
-}
-
-impl<'int, Int: Intern> Parse<'int, Int> for Vec<ClauseIn<'int, Int>> {
-    fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self> {
         let mut v = Vec::new();
-        while let Some((clause, moved_buf)) = buf.peek_parse::<Int, Clause<Name<_>>>(interner) {
+        while let Some(moved_buf) = {
+            let mut peek = *buf;
+            ClauseIn::<'int, Int>::parse(&mut peek, interner)
+                .ok()
+                .map(|c| (c, peek))
+        } {
+            let (clause, moved) = moved_buf;
             v.push(clause);
-            *buf = moved_buf;
+            *buf = moved;
         }
-        Ok(v)
+        Ok(ClauseDataset(v))
     }
 }
 
 impl<'int, Int: Intern> Parse<'int, Int> for ClauseIn<'int, Int> {
     fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self> {
-        let head = buf.parse::<Int, Term<Name<_>>>(interner)?;
+        let head = TermIn::<'int, Int>::parse(buf, interner)?;
 
         let body = if let Some((_, mut body_buf)) = buf.peek_parse::<Int, HornToken>(interner) {
             let dot = body_buf
@@ -39,7 +38,7 @@ impl<'int, Int: Intern> Parse<'int, Int> for ClauseIn<'int, Int> {
                 .find('.')
                 .ok_or(Error::from("clause must end with `.`"))?;
             body_buf.end = body_buf.start + dot;
-            let body = body_buf.parse::<Int, Expr<Name<_>>>(interner)?;
+            let body = ExprIn::<'int, Int>::parse(&mut body_buf, interner)?;
 
             buf.start = body_buf.end + 1; // Next to the dot
             Some(body)
@@ -48,11 +47,29 @@ impl<'int, Int: Intern> Parse<'int, Int> for ClauseIn<'int, Int> {
             None
         };
 
-        Ok(Self { head, body })
+        Ok(Clause { head, body })
     }
 }
 
-// Precedence: `Paren ()` -> `Not \+` -> `And ,` -> `Or ;`
+impl<'int, Int: Intern> Parse<'int, Int> for ExprIn<'int, Int> {
+    /// Caller is supposed to give the exact buffer for an Expr.
+    fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self> {
+        Expr::<Name<()>>::parse_or(*buf, interner)
+    }
+}
+
+impl<'int, Int: Intern> Parse<'int, Int> for TermIn<'int, Int> {
+    fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self> {
+        let functor = Name::parse(buf, interner)?;
+        let args = Term::parse_args(buf, interner)?;
+        Ok(Term { functor, args })
+    }
+}
+
+// Precedence: `Paren ()` -> `Not \+` -> `And ,` -> `Or ;`.
+// - So, `parse_or` is the entry point to parse an Expr.
+// - Plus, caller is supposed to give the exact buffer for an Expr. This can be done by detecting
+//   end of clause or something like that. That's why methods here don't take `&mut ParseBuffer`.
 impl Expr<Name<()>> {
     fn parse_or<'int, Int: Intern>(
         buf: ParseBuffer<'_>,
@@ -87,7 +104,7 @@ impl Expr<Name<()>> {
         if let Some((_, mut moved_buf)) = buf.peek_parse::<Int, OpenParenToken>(interner) {
             let r = moved_buf.cur_text().rfind(')').unwrap();
             moved_buf.end = moved_buf.start + r;
-            moved_buf.parse::<Int, Expr<Name<_>>>(interner)
+            ExprIn::<'int, Int>::parse(&mut moved_buf, interner)
         } else {
             Self::parse_term(buf, interner)
         }
@@ -100,7 +117,7 @@ impl Expr<Name<()>> {
         if buf.cur_text().chars().all(|c: char| c.is_whitespace()) {
             Err("expected a non-empty term expression".into())
         } else {
-            buf.parse::<Int, Term<Name<_>>>(interner).map(Expr::Term)
+            TermIn::<'int, Int>::parse(&mut buf, interner).map(Expr::Term)
         }
     }
 
@@ -149,13 +166,6 @@ impl Expr<Name<()>> {
     }
 }
 
-impl<'int, Int: Intern> Parse<'int, Int> for ExprIn<'int, Int> {
-    fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self> {
-        // The buffer range is not being moved by this call.
-        Expr::parse_or(*buf, interner)
-    }
-}
-
 impl Term<Name<()>> {
     fn parse_args<'int, Int: Intern>(
         buf: &mut ParseBuffer<'_>,
@@ -184,7 +194,7 @@ impl Term<Name<()>> {
                 return Err(format!("expected `,` from {}", buf.cur_text()).into());
             }
 
-            let arg = buf.parse::<Int, Term<Name<_>>>(interner)?;
+            let arg = TermIn::<'int, Int>::parse(buf, interner)?;
             args.push(arg);
 
             let comma = buf.parse::<Int, CommaToken>(interner);
@@ -199,30 +209,28 @@ impl Term<Name<()>> {
     }
 }
 
-impl<'int, Int: Intern> Parse<'int, Int> for TermIn<'int, Int> {
-    fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self> {
-        let functor = Name::parse(buf, interner)?;
-        let args = Term::parse_args(buf, interner)?;
-        Ok(Self { functor, args })
+/// Non-empty string.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Name<T>(T);
+
+impl<T: AsRef<str>> Name<T> {
+    pub fn new(s: T) -> Self {
+        assert!(!s.as_ref().is_empty());
+        Self(s)
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Name<T>(pub T); // Non-empty string
-
 impl Name<()> {
     pub fn with_intern<'int, Int: Intern>(s: &str, interner: &'int Int) -> NameIn<'int, Int> {
-        debug_assert!(!s.is_empty());
-
+        assert!(!s.is_empty());
         let interned = interner.intern_str(s);
         Name(interned)
     }
 }
 
-impl<T: AsRef<str>> Name<T> {
+impl<T: Atom> Name<T> {
     pub(crate) fn is_variable(&self) -> bool {
-        let first = self.0.as_ref().chars().next().unwrap();
-        first == VAR_PREFIX // btw, prolog style is `is_uppercase() or '_'`
+        self.0.is_variable()
     }
 }
 
@@ -230,7 +238,6 @@ impl<'int, Int: Intern> Parse<'int, Int> for NameIn<'int, Int> {
     fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self> {
         let ident = buf.parse::<Int, Ident>(interner)?;
         let interned = interner.intern_str(ident.to_text(buf.text));
-        debug_assert!(!interned.as_ref().is_empty());
         Ok(Self(interned))
     }
 }

@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, ptr::NonNull};
+use core::{marker::PhantomData, ptr::NonNull};
 
 /// A lightweight wrapper around a non-null pointer for a shared reference.
 ///

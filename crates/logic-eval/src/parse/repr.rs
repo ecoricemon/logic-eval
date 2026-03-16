@@ -1,11 +1,12 @@
 use super::text::Name;
+use crate::Atom;
 use std::{
     fmt::{self, Debug, Display, Write},
     ops,
     vec::IntoIter,
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Hash)]
 pub struct ClauseDataset<T>(pub Vec<Clause<T>>);
 
 impl<T> IntoIterator for ClauseDataset<T> {
@@ -25,21 +26,32 @@ impl<T> ops::Deref for ClauseDataset<T> {
     }
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Clause<T> {
     pub head: Term<T>,
     pub body: Option<Expr<T>>,
 }
 
 impl<T> Clause<T> {
-    pub(crate) fn map<U, F: FnMut(T) -> U>(self, f: &mut F) -> Clause<U> {
+    pub fn fact(head: Term<T>) -> Self {
+        Self { head, body: None }
+    }
+
+    pub fn rule(head: Term<T>, body: Expr<T>) -> Self {
+        Self {
+            head,
+            body: Some(body),
+        }
+    }
+
+    pub fn map<U, F: FnMut(T) -> U>(self, f: &mut F) -> Clause<U> {
         Clause {
             head: self.head.map(f),
             body: self.body.map(|expr| expr.map(f)),
         }
     }
 
-    pub(crate) fn replace_term<F>(&mut self, f: &mut F)
+    pub fn replace_term<F>(&mut self, f: &mut F)
     where
         F: FnMut(&Term<T>) -> Option<Term<T>>,
     {
@@ -50,7 +62,7 @@ impl<T> Clause<T> {
     }
 }
 
-impl<T: AsRef<str>> Display for Clause<T> {
+impl<T: Display> Display for Clause<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.head.fmt(f)?;
         if let Some(body) = &self.body {
@@ -61,14 +73,28 @@ impl<T: AsRef<str>> Display for Clause<T> {
     }
 }
 
-#[derive(Default, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Term<T> {
     pub functor: T,
     pub args: Vec<Term<T>>,
 }
 
 impl<T> Term<T> {
-    pub(crate) fn map<U, F: FnMut(T) -> U>(self, f: &mut F) -> Term<U> {
+    pub fn atom(functor: T) -> Self {
+        Term {
+            functor,
+            args: vec![],
+        }
+    }
+
+    pub fn compound<I: IntoIterator<Item = Term<T>>>(functor: T, args: I) -> Self {
+        Term {
+            functor,
+            args: args.into_iter().collect(),
+        }
+    }
+
+    pub fn map<U, F: FnMut(T) -> U>(self, f: &mut F) -> Term<U> {
         Term {
             functor: f(self.functor),
             args: self.args.into_iter().map(|arg| arg.map(f)).collect(),
@@ -101,7 +127,7 @@ impl<T: Clone> Term<T> {
     }
 }
 
-impl<T: AsRef<str>> Term<Name<T>> {
+impl<T: Atom> Term<Name<T>> {
     pub fn is_variable(&self) -> bool {
         let is_variable = self.functor.is_variable();
 
@@ -122,10 +148,9 @@ impl<T: AsRef<str>> Term<Name<T>> {
     }
 }
 
-impl<T: AsRef<str>> Display for Term<T> {
+impl<T: Display> Display for Term<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let functor: &str = self.functor.as_ref();
-        f.write_str(functor)?;
+        fmt::Display::fmt(&self.functor, f)?;
         if !self.args.is_empty() {
             f.write_char('(')?;
             for (i, arg) in self.args.iter().enumerate() {
@@ -140,22 +165,7 @@ impl<T: AsRef<str>> Display for Term<T> {
     }
 }
 
-impl<T: AsRef<str>> Debug for Term<Name<T>> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let functor: &str = self.functor.as_ref();
-        if self.args.is_empty() {
-            f.write_str(functor)
-        } else {
-            let mut d = f.debug_tuple(functor);
-            for arg in &self.args {
-                d.field(&arg);
-            }
-            d.finish()
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Expr<T> {
     Term(Term<T>),
     Not(Box<Expr<T>>),
@@ -164,7 +174,31 @@ pub enum Expr<T> {
 }
 
 impl<T> Expr<T> {
-    pub(crate) fn map<U, F: FnMut(T) -> U>(self, f: &mut F) -> Expr<U> {
+    pub fn term(term: Term<T>) -> Self {
+        Self::Term(term)
+    }
+
+    pub fn term_atom(functor: T) -> Self {
+        Self::Term(Term::atom(functor))
+    }
+
+    pub fn term_compound<I: IntoIterator<Item = Term<T>>>(functor: T, args: I) -> Self {
+        Self::Term(Term::compound(functor, args))
+    }
+
+    pub fn expr_not(expr: Expr<T>) -> Self {
+        Self::Not(Box::new(expr))
+    }
+
+    pub fn expr_and<I: IntoIterator<Item = Expr<T>>>(elems: I) -> Self {
+        Self::And(elems.into_iter().collect())
+    }
+
+    pub fn expr_or<I: IntoIterator<Item = Expr<T>>>(elems: I) -> Self {
+        Self::Or(elems.into_iter().collect())
+    }
+
+    pub fn map<U, F: FnMut(T) -> U>(self, f: &mut F) -> Expr<U> {
         match self {
             Self::Term(v) => Expr::Term(v.map(f)),
             Self::Not(v) => Expr::Not(Box::new(v.map(f))),
@@ -173,7 +207,7 @@ impl<T> Expr<T> {
         }
     }
 
-    pub(crate) fn replace_term<F>(&mut self, f: &mut F)
+    pub fn replace_term<F>(&mut self, f: &mut F)
     where
         F: FnMut(&Term<T>) -> Option<Term<T>>,
     {
@@ -191,7 +225,7 @@ impl<T> Expr<T> {
     }
 }
 
-impl<T: AsRef<str>> Display for Expr<T> {
+impl<T: Display> Display for Expr<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Term(term) => term.fmt(f)?,
@@ -229,29 +263,6 @@ impl<T: AsRef<str>> Display for Expr<T> {
             }
         }
         Ok(())
-    }
-}
-
-impl<T: AsRef<str>> Debug for Expr<Name<T>> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Term(term) => fmt::Debug::fmt(term, f),
-            Self::Not(inner) => f.debug_tuple("Not").field(inner).finish(),
-            Self::And(args) => {
-                let mut d = f.debug_tuple("And");
-                for arg in args {
-                    d.field(arg);
-                }
-                d.finish()
-            }
-            Self::Or(args) => {
-                let mut d = f.debug_tuple("Or");
-                for arg in args {
-                    d.field(arg);
-                }
-                d.finish()
-            }
-        }
     }
 }
 

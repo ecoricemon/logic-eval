@@ -192,3 +192,29 @@ pub(crate) struct Location {
     /// Exclusive
     right: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse::repr::Clause;
+
+    type Interner = any_intern::DroplessInterner;
+
+    #[test]
+    fn test_parse() {
+        fn assert(text: &str, interner: &Interner) {
+            let clause: Clause<_> = parse_str(text, interner).unwrap();
+            assert_eq!(text, clause.to_string());
+        }
+
+        let interner = Interner::new();
+
+        assert("f.", &interner);
+        assert("f(a, b).", &interner);
+        assert("f(a, b) :- f.", &interner);
+        assert("f(a, b) :- f(a).", &interner);
+        assert("f(a, b) :- f(a), f(b).", &interner);
+        assert("f(a, b) :- f(a); f(b).", &interner);
+        assert("f(a, b) :- f(a), (f(b); f(c)).", &interner);
+    }
+}

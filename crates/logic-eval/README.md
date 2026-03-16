@@ -11,15 +11,16 @@
 [codecov-badge]: https://codecov.io/gh/ecoricemon/logic-eval/graph/badge.svg?flag=logic-eval
 [codecov-url]: https://app.codecov.io/gh/ecoricemon/logic-eval?flags%5B0%5D=logic-eval
 
-A simple logic evaluator.
+A prolog-like logic evaluator.
 
 ## Example
 
 ```rust
-use logic_eval::{Database, parse_str};
+use logic_eval::{Database, StrInterner, parse_str};
 
-// Creates a DB with default interner.
+// Creates a DB.
 let mut db = Database::new();
+let interner = StrInterner::new();
 
 // Initializes the DB with a little bit of logic.
 let dataset = "
@@ -28,12 +29,12 @@ let dataset = "
     descend($X, $Y) :- child($X, $Y).
     descend($X, $Z) :- child($X, $Y), descend($Y, $Z).
 ";
-db.insert_dataset(parse_str(dataset, db.interner()).unwrap());
+db.insert_dataset(parse_str(dataset, &interner).unwrap());
 db.commit();
 
 // Queries the DB.
 let query = "descend($X, $Y).";
-let mut cx = db.query(parse_str(query, db.interner()).unwrap());
+let mut cx = db.query(parse_str(query, &interner).unwrap());
 
 let mut answer = Vec::new();
 while let Some(eval) = cx.prove_next() {
@@ -46,8 +47,4 @@ assert_eq!(answer, [
     "$X = b, $Y = c",
     "$X = a, $Y = c",
 ]);
-
-// If the database was created with default interner, it should be deallocated.
-drop(cx);
-db.dealloc();
 ```

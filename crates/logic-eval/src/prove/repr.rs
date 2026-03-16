@@ -1,7 +1,4 @@
-use crate::{
-    parse::repr::{Expr, Predicate, Term},
-    PassThroughState,
-};
+use crate::{Expr, PassThroughState, Predicate, Term};
 use fxhash::FxHasher;
 use indexmap::IndexMap;
 use std::{
@@ -14,8 +11,6 @@ pub(crate) struct ClauseId {
     pub(crate) head: TermId,
     pub(crate) body: Option<ExprId>,
 }
-
-// === TermStorage ===
 
 #[derive(Debug)]
 pub(crate) struct TermStorage<T> {
@@ -75,8 +70,6 @@ impl<T: Clone + Eq + Hash> TermStorage<T> {
         self.terms.insert(term)
     }
 }
-
-// === ExprArray ===
 
 #[derive(Debug)]
 pub(crate) struct ExprArray {
@@ -231,8 +224,6 @@ impl ops::IndexMut<ExprId> for [ExprElem] {
     }
 }
 
-// === ExprView ===
-
 #[derive(Clone, Copy)]
 pub(crate) struct ExprView<'a, T> {
     expr_buf: &'a [ExprElem],
@@ -353,8 +344,6 @@ impl<T> ExactSizeIterator for ExprViewIter<'_, T> {
 
 impl<T> iter::FusedIterator for ExprViewIter<'_, T> {}
 
-// === ExprViewMut ===
-
 pub(crate) struct ExprViewMut<'a, T> {
     exprs: &'a mut ExprArray,
     terms: &'a mut UniqueTermArray<T>,
@@ -366,8 +355,8 @@ impl<'a, T> ExprViewMut<'a, T> {
         self.id
     }
 
-    /// Finds the destination of jump (Elem::Expr) chain then moves this view
-    /// to the final expression.
+    /// Finds the destination of jump (Elem::Expr) chain then moves this view to the final
+    /// expression.
     fn find_then_move(&mut self) {
         self.id = self.find(self.id);
     }
@@ -417,21 +406,18 @@ impl<'a, T> ExprViewMut<'a, T> {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ApplyResult {
-    /// An expression still remains as an expression after application of a
-    /// boolean value.
+    /// An expression still remains as an expression after application of a boolean value.
     Expr,
 
-    /// An expression is completely evaluated after application of a boolean
-    /// value.
+    /// An expression is completely evaluated after application of a boolean value.
     Complete(bool),
 }
 
 impl<'a, T: Clone> ExprViewMut<'a, T> {
     /// Sets the most left term to the given boolean value.
     ///
-    /// This operation always clones the original expression then does the
-    /// setting on that. Plus, this could unwrap AND or OR if they do not
-    /// contain two or more arguments after evaluation.
+    /// This operation always clones the original expression then does the setting on that. Plus,
+    /// this could unwrap AND or OR if they do not contain two or more arguments after evaluation.
     pub(crate) fn apply_to_leftmost_term(&mut self, to: bool) -> ApplyResult {
         // Clones this expression deeply.
         let mut handle_term = |this: &mut Self, term_id: TermId, _: ()| {
@@ -511,12 +497,10 @@ impl<'a, T: Clone> ExprViewMut<'a, T> {
         }
     }
 
-    /// Replaces the most left expression(term) to the given `to` in a
-    /// clone-on-write way.
+    /// Replaces the most left expression(term) to the given `to` in a clone-on-write way.
     ///
-    /// If the replacement took place, then a new expression is created then
-    /// this view becomes to point the new expression instead of modifying
-    /// original expression directly.
+    /// If the replacement took place, then a new expression is created then this view becomes to
+    /// point the new expression instead of modifying original expression directly.
     pub(crate) fn replace_leftmost_term(&mut self, to: ExprId) -> bool {
         let mut has_met_first_term = false;
 
@@ -633,12 +617,10 @@ impl<'a, T: Clone> ExprViewMut<'a, T> {
 }
 
 impl<'a, T: Clone + Eq + Hash> ExprViewMut<'a, T> {
-    /// If this expression contains `from`, then replaces them to `to` in a
-    /// clone-on-write way.
+    /// If this expression contains `from`, then replaces them to `to` in a clone-on-write way.
     ///
-    /// If the replacement took place, then a new expression is created then
-    /// this view becomes to point the new expression instead of modifying
-    /// original expression directly.
+    /// If the replacement took place, then a new expression is created then this view becomes to
+    /// point the new expression instead of modifying original expression directly.
     pub(crate) fn replace_term(&mut self, from: TermId, to: TermId) -> bool {
         let mut handle_term = |this: &mut Self, term_id: TermId, (from, to): (TermId, TermId)| {
             let mut term_view = TermViewMut {
@@ -705,8 +687,6 @@ impl ops::AddAssign<usize> for ExprId {
     }
 }
 
-// === UniqueTermArray ===
-
 #[derive(Debug)]
 pub(crate) struct UniqueTermArray<T> {
     /// e.g. ... [Functor], [Len], [Arg0], [Arg1], ...
@@ -714,15 +694,13 @@ pub(crate) struct UniqueTermArray<T> {
 
     /// Mapping between term's hash values and terms.
     ///
-    /// This helps you find similar terms to keep the uniqueness. But for
-    /// efficiency, the value, [`Vec<TermId>`], could contain stale data. For
-    /// example, [`Self::buf`] could be shrunk by truncate method, but values of
-    /// this map still would point to removed area of the buffer becuase values
-    /// themselves are not shrunk.
+    /// This helps you find similar terms to keep the uniqueness. But for efficiency, the value,
+    /// [`Vec<TermId>`], could contain stale data. For example, [`Self::buf`] could be shrunk by
+    /// truncate method, but values of this map still would point to removed area of the buffer
+    /// becuase values themselves are not shrunk.
     ///
-    /// You are encouraged to call two methods below to access this field,
-    /// [`Self::add_mapping`] and [`Self::get_similar`], which hide the
-    /// problem.
+    /// You are encouraged to call two methods below to access this field, [`Self::add_mapping`] and
+    /// [`Self::get_similar`], which hide the problem.
     pub(crate) map: IndexMap<u64, Vec<TermId>, PassThroughState>,
 }
 
@@ -825,8 +803,8 @@ impl<T: Clone + Eq + Hash + PartialEq> UniqueTermArray<T> {
 
         // === Internal helper functions ===
 
-        /// Checks whether arguments of the given term has been set or not
-        /// by compairing with the predefined dummy value.
+        /// Checks whether arguments of the given term has been set or not by compairing with the
+        /// predefined dummy value.
         fn is_arg_set<T: PartialEq>(buf: &[TermElem<T>], id: TermId) -> bool {
             let arity = UniqueTermArray::_get(buf, id).arity();
             (0..arity).all(|i| buf[id.0 + 2 + i as usize] != TermElem::dummy())
@@ -930,8 +908,6 @@ impl<'a, T> Iterator for TermViewIter<'a, T> {
 }
 
 impl<T> iter::FusedIterator for TermViewIter<'_, T> {}
-
-// === TermView ===
 
 #[derive(Clone)]
 pub struct TermView<'a, T> {
@@ -1172,12 +1148,11 @@ impl<'a, T> TermViewMut<'a, T> {
 }
 
 impl<T: Clone + Eq + Hash> TermViewMut<'_, T> {
-    /// If this term is `from` or contains `from`, then replaces them to `to` in
-    /// a clone-on-write way.
+    /// If this term is `from` or contains `from`, then replaces them to `to` in a clone-on-write
+    /// way.
     ///
-    /// If the replacement took place, then a new term is created then this view
-    /// becomes to point the new term instead of modifying original term
-    /// directly.
+    /// If the replacement took place, then a new term is created then this view becomes to point
+    /// the new term instead of modifying original term directly.
     pub(crate) fn replace(&mut self, from: TermId, to: TermId) -> bool {
         if from == to {
             return false;
@@ -1341,10 +1316,7 @@ fn buf_term_hash<T: Hash>(buf: &[TermElem<T>], id: TermId) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        parse::{self, text::Name},
-        Intern, TermStorageIn, UniqueTermArrayIn,
-    };
+    use crate::{parse, ExprIn, Intern, Name, TermIn, TermStorageIn, UniqueTermArrayIn};
     use any_intern::DroplessInterner;
 
     #[test]
@@ -1537,7 +1509,7 @@ mod tests {
         interner: &'int Int,
         text: &str,
     ) -> ExprId {
-        let expr: Expr<Name<_>> = parse::parse_str(text, interner).unwrap();
+        let expr: ExprIn<'int, Int> = parse::parse_str(text, interner).unwrap();
         buf.insert_expr(expr)
     }
 
@@ -1546,7 +1518,7 @@ mod tests {
         interner: &'int Int,
         text: &str,
     ) -> TermId {
-        let term: Term<Name<_>> = parse::parse_str(text, interner).unwrap();
+        let term: TermIn<'int, Int> = parse::parse_str(text, interner).unwrap();
         arr.insert(term)
     }
 }
