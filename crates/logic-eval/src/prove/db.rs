@@ -7,27 +7,24 @@ use super::{
 };
 use crate::{
     parse::{
-        repr::{Clause, Expr, Predicate, Term},
-        text::Name,
+        repr::{Clause, ClauseDataset, Expr, Predicate, Term},
         VAR_PREFIX,
     },
     prove::repr::{ExprKind, ExprView, TermView, TermViewIter},
-    ClauseDatasetIn, ClauseIn, DefaultInterner, ExprIn, Int2Name, Intern, Map,
+    Atom, Map,
+};
+use core::{
+    fmt::{self, Debug, Display, Write},
+    iter::FusedIterator,
 };
 use indexmap::{IndexMap, IndexSet};
-use logic_eval_util::reference::Ref;
-use std::{
-    fmt::{self, Write},
-    iter,
-};
 
-#[derive(Debug)]
-pub struct Database<'int, Int: Intern = DefaultInterner> {
+pub struct Database<T> {
     /// Clause id dataset.
     clauses: IndexMap<Predicate<Integer>, Vec<ClauseId>>,
 
     /// We do not allow duplicated clauses in the dataset.
-    clause_texts: IndexSet<String>,
+    clause_set: IndexSet<Clause<T>>,
 
     /// Term and expression storage.
     stor: TermStorage<Integer>,
@@ -35,87 +32,38 @@ pub struct Database<'int, Int: Intern = DefaultInterner> {
     /// Proof search engine.
     prover: Prover,
 
-    /// Mappings between [`Name`] and [`Int`].
+    /// Mappings between T and Integer.
     ///
-    /// [`Int`] is internally used for fast comparison, but we need to get it
-    /// back to [`Name`] for the clients.
-    nimap: NameIntMap<'int, Int>,
+    /// Integer is internally used for fast comparison, but we need to get it back to T for the
+    /// clients.
+    nimap: NameIntMap<T>,
 
     /// States of DB's fields.
     ///
     /// This is used when we discard some changes on the DB.
     revert_point: Option<DatabaseState>,
-
-    interner: Ref<'int, Int>,
 }
 
-impl Database<'static> {
-    /// Creates a database with default string interner.
-    ///
-    /// Because creating database through this method makes a leaked memory, you should not forget
-    /// to call [`dealloc`](Self::dealloc).
-    #[allow(clippy::new_without_default)]
+impl<T: Atom> Database<T> {
     pub fn new() -> Self {
-        let leaked = Box::leak(Box::new(DefaultInterner::default()));
-        let interner = Ref::from_mut(leaked);
-
         Self {
             clauses: IndexMap::default(),
-            clause_texts: IndexSet::default(),
+            clause_set: IndexSet::default(),
             stor: TermStorage::new(),
             prover: Prover::new(),
-            nimap: NameIntMap::new(interner),
+            nimap: NameIntMap::new(),
             revert_point: None,
-            interner,
         }
     }
 
-    #[rustfmt::skip]
-    pub fn dealloc(self) {
-        // Prevents us from accidently implementing Clone for the type. Deallocation relies on the
-        // fact that the type cannot be cloned, so that we have only one instance.
-        #[allow(dead_code)]
-        {
-            struct ImplDetector<T>(std::marker::PhantomData<T>);
-            trait NotClone { const IS_CLONE: bool = false; }
-            impl<T> NotClone for ImplDetector<T> {}
-            impl<T: Clone> ImplDetector<T> { const IS_CLONE: bool = true; }
-            const _: () = assert!(!ImplDetector::<Database<'static>>::IS_CLONE);
-        }
-
-        // Safety:
-        // * There's only one instance and we got the ownership of the instance.
-        let _ = unsafe { Box::from_raw(self.interner.as_ptr()) };
-    }
-}
-
-impl<'int, Int: Intern> Database<'int, Int> {
-    pub fn with_interner(interner: &'int Int) -> Self {
-        let interner = Ref::from_ref(interner);
-
-        Self {
-            clauses: IndexMap::default(),
-            clause_texts: IndexSet::default(),
-            stor: TermStorage::new(),
-            prover: Prover::new(),
-            nimap: NameIntMap::new(interner),
-            revert_point: None,
-            interner,
-        }
-    }
-
-    pub fn interner(&self) -> &'int Int {
-        self.interner.as_ref()
-    }
-
-    pub fn terms(&self) -> NamedTermViewIter<'_, 'int, Int> {
+    pub fn terms(&self) -> NamedTermViewIter<'_, T> {
         NamedTermViewIter {
             term_iter: self.stor.terms.terms(),
             int2name: &self.nimap.int2name,
         }
     }
 
-    pub fn clauses(&self) -> ClauseIter<'_, 'int, Int> {
+    pub fn clauses(&self) -> ClauseIter<'_, T> {
         ClauseIter {
             clauses: &self.clauses,
             stor: &self.stor,
@@ -125,32 +73,24 @@ impl<'int, Int: Intern> Database<'int, Int> {
         }
     }
 
-    pub fn insert_dataset(&mut self, dataset: ClauseDatasetIn<'int, Int>) {
+    pub fn insert_dataset(&mut self, dataset: ClauseDataset<T>) {
         for clause in dataset {
             self.insert_clause(clause);
         }
     }
 
-    pub fn insert_clause(&mut self, clause: ClauseIn<'int, Int>) {
-        // Saves current state. We will revert DB when the change is not
-        // committed.
+    pub fn insert_clause(&mut self, clause: Clause<T>) {
+        // Saves current state. We will revert DB when the change is not committed.
         if self.revert_point.is_none() {
             self.revert_point = Some(self.state());
         }
 
-        // If this DB contains the given clause, then returns.
-        let serialized = if let Some(converted) =
-            Clause::convert_var_into_num(&clause, self.interner.as_ref())
-        {
-            converted.to_string()
-        } else {
-            clause.to_string()
-        };
-        if !self.clause_texts.insert(serialized) {
+        // If the DB already contains the given clause, then returns.
+        if !self.clause_set.insert(clause.clone()) {
             return;
         }
 
-        let clause = clause.map(&mut |name| self.nimap.name_to_int(name));
+        let clause = clause.map(&mut |t| self.nimap.name_to_int(t));
 
         let key = clause.head.predicate();
         let value = ClauseId {
@@ -168,8 +108,8 @@ impl<'int, Int: Intern> Database<'int, Int> {
             .or_insert(vec![value]);
     }
 
-    pub fn query(&mut self, expr: ExprIn<'int, Int>) -> ProveCx<'_, 'int, Int> {
-        // Discards uncomitted changes.
+    pub fn query(&mut self, expr: Expr<T>) -> ProveCx<'_, T> {
+        // Discards uncommitted changes.
         if let Some(revert_point) = self.revert_point.take() {
             self.revert(revert_point);
         }
@@ -183,7 +123,13 @@ impl<'int, Int: Intern> Database<'int, Int> {
     }
 
     /// * sanitize - Removes unacceptable characters from prolog.
-    pub fn to_prolog<F: FnMut(&str) -> &str>(&self, sanitize: F) -> String {
+    ///
+    /// Requires T to implement [`AsRef<str>`] so that functor names can be serialized into Prolog
+    /// syntax.
+    pub fn to_prolog<F: FnMut(&str) -> &str>(&self, sanitize: F) -> String
+    where
+        T: AsRef<str>,
+    {
         let mut prolog_text = String::new();
 
         let mut conv_map = ConversionMap {
@@ -213,17 +159,17 @@ impl<'int, Int: Intern> Database<'int, Int> {
 
         // === Internal helper functions ===
 
-        struct ConversionMap<'a, 'int, Int: Intern, F> {
+        struct ConversionMap<'a, T, F> {
             int_to_str: Map<Integer, String>,
             // e.g. 0 -> No suffix, 1 -> _1, 2 -> _2, ...
             sanitized_to_suffix: Map<&'a str, u32>,
-            int2name: &'a Int2Name<'int, Int>,
+            int2name: &'a IndexMap<Integer, T>,
             sanitizer: F,
         }
 
-        impl<Int, F> ConversionMap<'_, '_, Int, F>
+        impl<T, F> ConversionMap<'_, T, F>
         where
-            Int: Intern,
+            T: AsRef<str>,
             F: FnMut(&str) -> &str,
         {
             fn int_to_str(&mut self, int: Integer) -> &str {
@@ -275,12 +221,12 @@ impl<'int, Int: Intern> Database<'int, Int> {
             }
         }
 
-        fn write_term<Int, F>(
+        fn write_term<T, F>(
             term: TermView<'_, Integer>,
-            conv_map: &mut ConversionMap<'_, '_, Int, F>,
+            conv_map: &mut ConversionMap<'_, T, F>,
             prolog_text: &mut String,
         ) where
-            Int: Intern,
+            T: AsRef<str>,
             F: FnMut(&str) -> &str,
         {
             let functor = term.functor();
@@ -302,12 +248,12 @@ impl<'int, Int: Intern> Database<'int, Int> {
             }
         }
 
-        fn write_expr<Int, F>(
+        fn write_expr<T, F>(
             expr: ExprView<'_, Integer>,
-            conv_map: &mut ConversionMap<'_, '_, Int, F>,
+            conv_map: &mut ConversionMap<'_, T, F>,
             prolog_text: &mut String,
         ) where
-            Int: Intern,
+            T: AsRef<str>,
             F: FnMut(&str) -> &str,
         {
             match expr.as_kind() {
@@ -356,7 +302,7 @@ impl<'int, Int: Intern> Database<'int, Int> {
         &mut self,
         DatabaseState {
             clauses_len,
-            clause_texts_len,
+            clause_set_len,
             stor_len,
             nimap_state,
         }: DatabaseState,
@@ -365,7 +311,7 @@ impl<'int, Int: Intern> Database<'int, Int> {
         for (i, len) in clauses_len.into_iter().enumerate() {
             self.clauses[i].truncate(len);
         }
-        self.clause_texts.truncate(clause_texts_len);
+        self.clause_set.truncate(clause_set_len);
         self.stor.truncate(stor_len);
         self.nimap.revert(nimap_state);
         // `self.prover: Prover` does not store any persistent data.
@@ -374,32 +320,109 @@ impl<'int, Int: Intern> Database<'int, Int> {
     fn state(&self) -> DatabaseState {
         DatabaseState {
             clauses_len: self.clauses.values().map(|v| v.len()).collect(),
-            clause_texts_len: self.clause_texts.len(),
+            clause_set_len: self.clause_set.len(),
             stor_len: self.stor.len(),
             nimap_state: self.nimap.state(),
         }
     }
 }
 
+impl<T: Atom> Default for Database<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Debug> Debug for Database<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Database")
+            .field("clauses", &self.clauses)
+            .field("clause_set", &self.clause_set)
+            .field("stor", &self.stor)
+            .field("nimap", &self.nimap)
+            .field("revert_point", &self.revert_point)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct DatabaseState {
     clauses_len: Vec<usize>,
-    clause_texts_len: usize,
+    clause_set_len: usize,
     stor_len: TermStorageLen,
     nimap_state: NameIntMapState,
 }
 
+/// Turns variables into `_$0`, `_$1`, and so on using the given canonical_var function.
+///
+/// Returns `None` if `canonical_var` is `None` (i.e. deduplication disabled).
+fn _convert_var_into_num<T: Atom>(
+    this: &Clause<T>,
+    canonical_var: Option<&dyn Fn(usize) -> T>,
+) -> Option<Clause<T>> {
+    let canonical_var = canonical_var?;
+    let mut cloned: Option<Clause<T>> = None;
+
+    let mut i = 0;
+
+    while let Some(from) = find_var_in_clause(cloned.as_ref().unwrap_or(this)) {
+        let from = from.clone();
+        let canonical_t = canonical_var(i);
+
+        let mut convert = |term: &Term<T>| {
+            (term.functor == from && term.args.is_empty()).then_some(Term {
+                functor: canonical_t.clone(),
+                args: vec![],
+            })
+        };
+
+        if let Some(cloned) = &mut cloned {
+            cloned.replace_term(&mut convert);
+        } else {
+            let mut this = this.clone();
+            this.replace_term(&mut convert);
+            cloned = Some(this);
+        }
+
+        i += 1;
+    }
+
+    return cloned;
+
+    // === Internal helper functions ===
+
+    fn find_var_in_clause<T: Atom>(clause: &Clause<T>) -> Option<T> {
+        find_var_in_term(&clause.head).or_else(|| clause.body.as_ref().and_then(find_var_in_expr))
+    }
+
+    fn find_var_in_expr<T: Atom>(expr: &Expr<T>) -> Option<T> {
+        match expr {
+            Expr::Term(t) => find_var_in_term(t),
+            Expr::Not(e) => find_var_in_expr(e),
+            Expr::And(v) | Expr::Or(v) => v.iter().find_map(find_var_in_expr),
+        }
+    }
+
+    fn find_var_in_term<T: Atom>(term: &Term<T>) -> Option<T> {
+        if term.functor.is_variable() {
+            Some(term.functor.clone())
+        } else {
+            term.args.iter().find_map(find_var_in_term)
+        }
+    }
+}
+
 #[derive(Clone)]
-pub struct ClauseIter<'a, 'int, Int: Intern> {
+pub struct ClauseIter<'a, T> {
     clauses: &'a IndexMap<Predicate<Integer>, Vec<ClauseId>>,
     stor: &'a TermStorage<Integer>,
-    int2name: &'a Int2Name<'int, Int>,
+    int2name: &'a IndexMap<Integer, T>,
     i: usize,
     j: usize,
 }
 
-impl<'a, 'int, Int: Intern> Iterator for ClauseIter<'a, 'int, Int> {
-    type Item = ClauseRef<'a, 'int, Int>;
+impl<'a, T> Iterator for ClauseIter<'a, T> {
+    type Item = ClauseRef<'a, T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let id = loop {
@@ -422,21 +445,21 @@ impl<'a, 'int, Int: Intern> Iterator for ClauseIter<'a, 'int, Int> {
     }
 }
 
-impl<Int: Intern> iter::FusedIterator for ClauseIter<'_, '_, Int> {}
+impl<T> FusedIterator for ClauseIter<'_, T> {}
 
-pub struct ClauseRef<'a, 'int, Int: Intern> {
+pub struct ClauseRef<'a, T> {
     id: ClauseId,
     stor: &'a TermStorage<Integer>,
-    int2name: &'a Int2Name<'int, Int>,
+    int2name: &'a IndexMap<Integer, T>,
 }
 
-impl<'a, 'int, Int: Intern> ClauseRef<'a, 'int, Int> {
-    pub fn head(&self) -> NamedTermView<'a, 'int, Int> {
+impl<'a, T: Atom> ClauseRef<'a, T> {
+    pub fn head(&self) -> NamedTermView<'a, T> {
         let head = self.stor.get_term(self.id.head);
         NamedTermView::new(head, self.int2name)
     }
 
-    pub fn body(&self) -> Option<NamedExprView<'a, 'int, Int>> {
+    pub fn body(&self) -> Option<NamedExprView<'a, T>> {
         self.id.body.map(|id| {
             let body = self.stor.get_expr(id);
             NamedExprView::new(body, self.int2name)
@@ -444,20 +467,20 @@ impl<'a, 'int, Int: Intern> ClauseRef<'a, 'int, Int> {
     }
 }
 
-impl<Int: Intern> fmt::Display for ClauseRef<'_, '_, Int> {
+impl<T: Atom + Display> Display for ClauseRef<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.head(), f)?;
+        Display::fmt(&self.head(), f)?;
 
         if let Some(body) = self.body() {
             f.write_str(" :- ")?;
-            fmt::Display::fmt(&body, f)?
+            Display::fmt(&body, f)?
         }
 
         f.write_char('.')
     }
 }
 
-impl<Int: Intern> fmt::Debug for ClauseRef<'_, '_, Int> {
+impl<T: Atom + Debug> Debug for ClauseRef<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut d = f.debug_struct("Clause");
 
@@ -473,76 +496,13 @@ impl<Int: Intern> fmt::Debug for ClauseRef<'_, '_, Int> {
     }
 }
 
-impl Clause<Name<()>> {
-    /// Turns variables into `_$0`, `_$1`, and so on.
-    pub(crate) fn convert_var_into_num<'int, Int: Intern>(
-        this: &ClauseIn<'int, Int>,
-        interner: &'int Int,
-    ) -> Option<ClauseIn<'int, Int>> {
-        let mut cloned: Option<ClauseIn<'int, Int>> = None;
-
-        let mut i = 0;
-
-        while let Some(var) = find_var_in_clause(cloned.as_ref().unwrap_or(this)) {
-            let from = var.clone();
-
-            let mut convert = |term: &Term<Name<_>>| {
-                (term == &from).then_some(Term {
-                    functor: Name::with_intern(&format!("_{VAR_PREFIX}{i}"), interner),
-                    args: [].into(),
-                })
-            };
-
-            if let Some(cloned) = &mut cloned {
-                cloned.replace_term(&mut convert);
-            } else {
-                let mut this = this.clone();
-                this.replace_term(&mut convert);
-                cloned = Some(this);
-            }
-
-            i += 1;
-        }
-
-        return cloned;
-
-        // === Internal helper functions ===
-
-        fn find_var_in_clause<T: AsRef<str>>(clause: &Clause<Name<T>>) -> Option<&Term<Name<T>>> {
-            let var = find_var_in_term(&clause.head);
-            if var.is_some() {
-                return var;
-            }
-            find_var_in_expr(clause.body.as_ref()?)
-        }
-
-        fn find_var_in_expr<T: AsRef<str>>(expr: &Expr<Name<T>>) -> Option<&Term<Name<T>>> {
-            match expr {
-                Expr::Term(term) => find_var_in_term(term),
-                Expr::Not(inner) => find_var_in_expr(inner),
-                Expr::And(args) | Expr::Or(args) => args.iter().find_map(find_var_in_expr),
-            }
-        }
-
-        fn find_var_in_term<T: AsRef<str>>(term: &Term<Name<T>>) -> Option<&Term<Name<T>>> {
-            const _: () = assert!(VAR_PREFIX == '$');
-
-            if term.is_variable() && !term.functor.as_ref().starts_with("_$") {
-                Some(term)
-            } else {
-                term.args.iter().find_map(find_var_in_term)
-            }
-        }
-    }
-}
-
-pub struct NamedTermViewIter<'a, 'int, Int: Intern> {
+pub struct NamedTermViewIter<'a, T> {
     term_iter: TermViewIter<'a, Integer>,
-    int2name: &'a Int2Name<'int, Int>,
+    int2name: &'a IndexMap<Integer, T>,
 }
 
-impl<'a, 'int, Int: Intern> Iterator for NamedTermViewIter<'a, 'int, Int> {
-    type Item = NamedTermView<'a, 'int, Int>;
+impl<'a, T: Atom> Iterator for NamedTermViewIter<'a, T> {
+    type Item = NamedTermView<'a, T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         self.term_iter
@@ -551,110 +511,81 @@ impl<'a, 'int, Int: Intern> Iterator for NamedTermViewIter<'a, 'int, Int> {
     }
 }
 
-impl<Int: Intern> iter::FusedIterator for NamedTermViewIter<'_, '_, Int> {}
+impl<T: Atom> FusedIterator for NamedTermViewIter<'_, T> {}
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::parse::{
-        self,
-        repr::{Clause, ClauseDataset, Expr},
-    };
-    use any_intern::DroplessInterner;
+mod str_atom_tests {
+    use crate::{parse, NameIn};
 
-    #[test]
-    fn test_parse() {
-        fn assert(text: &str, interner: &impl Intern) {
-            let clause: Clause<Name<_>> = parse::parse_str(text, interner).unwrap();
-            assert_eq!(text, clause.to_string());
-        }
-
-        let interner = DroplessInterner::default();
-
-        assert("f.", &interner);
-        assert("f(a, b).", &interner);
-        assert("f(a, b) :- f.", &interner);
-        assert("f(a, b) :- f(a).", &interner);
-        assert("f(a, b) :- f(a), f(b).", &interner);
-        assert("f(a, b) :- f(a); f(b).", &interner);
-        assert("f(a, b) :- f(a), (f(b); f(c)).", &interner);
-    }
+    type Interner = any_intern::DroplessInterner;
+    type Database<'int> = crate::Database<NameIn<'int, Interner>>;
+    type ProveCx<'a, 'int> = crate::ProveCx<'a, NameIn<'int, Interner>>;
+    type ClauseDataset<'int> = crate::ClauseDatasetIn<'int, Interner>;
+    type Expr<'int> = crate::ExprIn<'int, Interner>;
+    type Clause<'int> = crate::ClauseIn<'int, Interner>;
 
     #[test]
     fn test_serial_queries() {
-        fn insert<Int: Intern>(db: &mut Database<'_, Int>) {
+        fn assert_query<'int>(db: &mut Database<'int>, interner: &'int Interner) {
+            let query = "g($X).";
+            let query: Expr<'int> = parse::parse_str(query, interner).unwrap();
+
+            let cx = db.query(query);
+            let answer = collect_answer(cx);
+            let expected = [["$X = a"], ["$X = b"]];
+            assert_eq!(answer, expected);
+        }
+
+        let mut db = Database::new();
+        let interner = Interner::new();
+
+        for _ in 0..2 {
             insert_dataset(
-                db,
+                &mut db,
+                &interner,
                 r"
                 f(a).
                 f(b).
                 g($X) :- f($X).
                 ",
             );
+            let len = db.stor.len();
+            assert_query(&mut db, &interner);
+            assert_eq!(db.stor.len(), len);
         }
-
-        fn query<Int: Intern>(db: &mut Database<'_, Int>) {
-            let query = "g($X).";
-            let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
-            let answer = collect_answer(db.query(query));
-
-            let expected = [["$X = a"], ["$X = b"]];
-
-            assert_eq!(answer, expected);
-        }
-
-        let mut db = Database::new();
-
-        insert(&mut db);
-        let org_stor_len = db.stor.len();
-        query(&mut db);
-        debug_assert_eq!(org_stor_len, db.stor.len());
-
-        insert(&mut db);
-        debug_assert_eq!(org_stor_len, db.stor.len());
-        query(&mut db);
-        debug_assert_eq!(org_stor_len, db.stor.len());
-
-        db.dealloc();
     }
 
     #[test]
-    fn test_various_expressions() {
-        test_not_expression();
-        test_and_expression();
-        test_or_expression();
-        test_mixed_expression();
-    }
-
     fn test_not_expression() {
         let mut db = Database::new();
+        let interner = Interner::new();
 
         insert_dataset(
             &mut db,
+            &interner,
             r"
             g(a).
             f($X) :- \+ g($X).
             ",
         );
 
-        let query = "f(a).";
-        let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
+        let query: Expr<'_> = parse::parse_str("f(a).", &interner).unwrap();
         let answer = collect_answer(db.query(query));
         assert!(answer.is_empty());
 
-        let query = "f(b).";
-        let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
+        let query: Expr<'_> = parse::parse_str("f(b).", &interner).unwrap();
         let answer = collect_answer(db.query(query));
         assert_eq!(answer.len(), 1);
-
-        db.dealloc();
     }
 
+    #[test]
     fn test_and_expression() {
         let mut db = Database::new();
+        let interner = Interner::new();
 
         insert_dataset(
             &mut db,
+            &interner,
             r"
             g(a).
             g(b).
@@ -663,21 +594,20 @@ mod tests {
             ",
         );
 
-        let query = "f($X).";
-        let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
+        let query: Expr<'_> = parse::parse_str("f($X).", &interner).unwrap();
         let answer = collect_answer(db.query(query));
-
         let expected = [["$X = b"]];
         assert_eq!(answer, expected);
-
-        db.dealloc();
     }
 
+    #[test]
     fn test_or_expression() {
         let mut db = Database::new();
+        let interner = Interner::new();
 
         insert_dataset(
             &mut db,
+            &interner,
             r"
             g(a).
             h(b).
@@ -685,21 +615,20 @@ mod tests {
             ",
         );
 
-        let query = "f($X).";
-        let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
+        let query: Expr<'_> = parse::parse_str("f($X).", &interner).unwrap();
         let answer = collect_answer(db.query(query));
-
         let expected = [["$X = a"], ["$X = b"]];
         assert_eq!(answer, expected);
-
-        db.dealloc();
     }
 
+    #[test]
     fn test_mixed_expression() {
         let mut db = Database::new();
+        let interner = Interner::new();
 
         insert_dataset(
             &mut db,
+            &interner,
             r"
             g(b).
             g(c).
@@ -714,27 +643,20 @@ mod tests {
             ",
         );
 
-        let query = "f($X).";
-        let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
+        let query: Expr<'_> = parse::parse_str("f($X).", &interner).unwrap();
         let answer = collect_answer(db.query(query));
-
         let expected = [["$X = b"]];
         assert_eq!(answer, expected);
-
-        db.dealloc();
     }
 
     #[test]
-    fn test_recursion() {
-        test_simple_recursion();
-        test_right_recursion();
-    }
-
     fn test_simple_recursion() {
         let mut db = Database::new();
+        let interner = Interner::new();
 
         insert_dataset(
             &mut db,
+            &interner,
             r"
             impl(Clone, a).
             impl(Clone, b).
@@ -743,8 +665,7 @@ mod tests {
             ",
         );
 
-        let query = "impl(Clone, $T).";
-        let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
+        let query: Expr<'_> = parse::parse_str("impl(Clone, $T).", &interner).unwrap();
         let mut cx = db.query(query);
 
         let mut assert_next = |expected: &[&str]| {
@@ -762,16 +683,16 @@ mod tests {
         assert_next(&["$T = Vec(Vec(a))"]);
         assert_next(&["$T = Vec(Vec(b))"]);
         assert_next(&["$T = Vec(Vec(c))"]);
-
-        drop(cx);
-        db.dealloc();
     }
 
+    #[test]
     fn test_right_recursion() {
         let mut db = Database::new();
+        let interner = Interner::new();
 
         insert_dataset(
             &mut db,
+            &interner,
             r"
             child(a, b).
             child(b, c).
@@ -781,8 +702,7 @@ mod tests {
             ",
         );
 
-        let query = "descend($X, $Y).";
-        let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
+        let query: Expr<'_> = parse::parse_str("descend($X, $Y).", &interner).unwrap();
         let mut answer = collect_answer(db.query(query));
 
         let mut expected = [
@@ -797,47 +717,157 @@ mod tests {
         answer.sort_unstable();
         expected.sort_unstable();
         assert_eq!(answer, expected);
-
-        db.dealloc();
     }
 
     #[test]
     fn test_discarding_uncomitted_change() {
         let mut db = Database::new();
+        let interner = Interner::new();
 
-        let text = "f(a).";
-        let clause = parse::parse_str(text, db.interner()).unwrap();
+        let clause: Clause<'_> = parse::parse_str("f(a).", &interner).unwrap();
         db.insert_clause(clause);
         let fa_state = db.state();
         db.commit();
 
-        let text = "f(b).";
-        let clause = parse::parse_str(text, db.interner()).unwrap();
+        let clause: Clause<'_> = parse::parse_str("f(b).", &interner).unwrap();
         db.insert_clause(clause);
 
-        let query = "f($X).";
-        let query: Expr<Name<_>> = parse::parse_str(query, db.interner()).unwrap();
+        let query: Expr<'_> = parse::parse_str("f($X).", &interner).unwrap();
         let answer = collect_answer(db.query(query));
 
         // `f(b).` was discarded.
         let expected = [["$X = a"]];
         assert_eq!(answer, expected);
         assert_eq!(db.state(), fa_state);
-
-        db.dealloc();
     }
 
-    fn insert_dataset<Int: Intern>(db: &mut Database<'_, Int>, text: &str) {
-        let dataset: ClauseDataset<Name<_>> = parse::parse_str(text, db.interner()).unwrap();
+    // === Test helper functions ===
+
+    fn insert_dataset<'int>(db: &mut Database<'int>, interner: &'int Interner, text: &str) {
+        let dataset: ClauseDataset<'int> = parse::parse_str(text, interner).unwrap();
         db.insert_dataset(dataset);
         db.commit();
     }
 
-    fn collect_answer<Int: Intern>(mut cx: ProveCx<'_, '_, Int>) -> Vec<Vec<String>> {
+    fn collect_answer(mut cx: ProveCx<'_, '_>) -> Vec<Vec<String>> {
         let mut v = Vec::new();
         while let Some(eval) = cx.prove_next() {
             let x = eval.map(|assign| assign.to_string()).collect::<Vec<_>>();
             v.push(x);
+        }
+        v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Atom, Clause, ClauseDataset, Database, Expr, ProveCx, Term};
+
+    #[test]
+    fn test_custom_atom() {
+        #[allow(non_camel_case_types)]
+        #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+        enum A {
+            child,
+            descend,
+            a,
+            b,
+            c,
+            d,
+            X,
+            Y,
+            Z,
+        }
+
+        impl Atom for A {
+            fn is_variable(&self) -> bool {
+                matches!(self, A::X | A::Y | A::Z)
+            }
+        }
+
+        let mut db = Database::new();
+
+        let child_a_b = Clause::fact(Term::compound(
+            A::child,
+            [Term::atom(A::a), Term::atom(A::b)],
+        ));
+        let child_b_c = Clause::fact(Term::compound(
+            A::child,
+            [Term::atom(A::b), Term::atom(A::c)],
+        ));
+        let child_c_d = Clause::fact(Term::compound(
+            A::child,
+            [Term::atom(A::c), Term::atom(A::d)],
+        ));
+        let descend_x_y = Clause::rule(
+            Term::compound(A::descend, [Term::atom(A::X), Term::atom(A::Y)]),
+            Expr::term_compound(A::child, [Term::atom(A::X), Term::atom(A::Y)]),
+        );
+        let descend_x_z = Clause::rule(
+            Term::compound(A::descend, [Term::atom(A::X), Term::atom(A::Z)]),
+            Expr::expr_and([
+                Expr::term_compound(A::child, [Term::atom(A::X), Term::atom(A::Y)]),
+                Expr::term_compound(A::descend, [Term::atom(A::Y), Term::atom(A::Z)]),
+            ]),
+        );
+        insert_dataset(
+            &mut db,
+            crate::ClauseDataset(vec![
+                child_a_b,
+                child_b_c,
+                child_c_d,
+                descend_x_y,
+                descend_x_z,
+            ]),
+        );
+
+        let query = Expr::term_compound(A::descend, [Term::atom(A::X), Term::atom(A::Y)]);
+        let mut answer = collect_answer(db.query(query));
+
+        let mut expected = [
+            [
+                (Term::atom(A::X), Term::atom(A::a)),
+                (Term::atom(A::Y), Term::atom(A::b)),
+            ],
+            [
+                (Term::atom(A::X), Term::atom(A::a)),
+                (Term::atom(A::Y), Term::atom(A::c)),
+            ],
+            [
+                (Term::atom(A::X), Term::atom(A::a)),
+                (Term::atom(A::Y), Term::atom(A::d)),
+            ],
+            [
+                (Term::atom(A::X), Term::atom(A::b)),
+                (Term::atom(A::Y), Term::atom(A::c)),
+            ],
+            [
+                (Term::atom(A::X), Term::atom(A::b)),
+                (Term::atom(A::Y), Term::atom(A::d)),
+            ],
+            [
+                (Term::atom(A::X), Term::atom(A::c)),
+                (Term::atom(A::Y), Term::atom(A::d)),
+            ],
+        ];
+
+        answer.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(answer, expected);
+    }
+
+    // === Test helper functions ===
+
+    fn insert_dataset<T: Atom>(db: &mut Database<T>, dataset: ClauseDataset<T>) {
+        db.insert_dataset(dataset);
+        db.commit();
+    }
+
+    fn collect_answer<T: Atom>(mut cx: ProveCx<'_, T>) -> Vec<Vec<(Term<T>, Term<T>)>> {
+        let mut v = Vec::new();
+        while let Some(eval) = cx.prove_next() {
+            let pairs = eval.map(|assign| (assign.lhs(), assign.rhs())).collect();
+            v.push(pairs);
         }
         v
     }
