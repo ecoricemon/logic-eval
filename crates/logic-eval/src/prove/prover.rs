@@ -1,10 +1,15 @@
-use super::repr::{
-    ApplyResult, ClauseId, ExprId, ExprKind, ExprView, TermDeepView, TermElem, TermId, TermStorage,
-    TermStorageLen, TermView, TermViewMut, UniqueTermArray,
+use super::{
+    canonical,
+    repr::{
+        ApplyResult, ClauseId, ExprId, ExprKind, ExprView, TermDeepView, TermElem, TermId,
+        TermStorage, TermStorageLen, TermView, TermViewMut, UniqueTermArray,
+    },
+    table::Table,
 };
 use crate::{
     parse::repr::{Expr, Predicate, Term},
-    Atom, Map, VAR_PREFIX,
+    prove::table::{TableEntry, TableIndex},
+    Atom, IndexMap, IndexSet, Map, VAR_PREFIX,
 };
 use core::{
     fmt::{self, Debug, Display, Write},
@@ -12,10 +17,8 @@ use core::{
     iter,
     ops::{self, Range},
 };
-use indexmap::IndexMap;
+use smallvec::SmallVec;
 use std::collections::VecDeque;
-
-pub(crate) type ClauseMap = IndexMap<Predicate<Integer>, Vec<ClauseId>>;
 
 #[derive(Debug)]
 pub(crate) struct Prover {
@@ -24,11 +27,8 @@ pub(crate) struct Prover {
     /// Nodes created during proof search.
     nodes: Vec<Node>,
 
-    /// Variable assignments.
-    ///
-    /// For example, `assignment[X] = a` means that `X(term id)` is assigned to `a(term id)`. If a
-    /// value is identical to its index, it means the term is not assigned to anything.
-    assignments: Vec<usize>,
+    /// Variable assignments (e.g. X = a, Y = z)
+    term_assigns: TermAssignments,
 
     /// A given query.
     query: ExprId,
@@ -38,8 +38,11 @@ pub(crate) struct Prover {
     /// This could be used to find what terms these variables are assigned to.
     query_vars: Vec<TermId>,
 
+    /// Previously returned query answers.
+    query_answers: Vec<Vec<TermId>>,
+
     /// Task queue containing node index.
-    queue: VecDeque<usize>,
+    queue: NodeQueue,
 
     /// A buffer containing mapping between variables and temporary variables.
     ///
@@ -49,6 +52,9 @@ pub(crate) struct Prover {
 
     /// A monotonically increasing integer that is used for generating temporary variables.
     temp_var_int: u32,
+
+    /// SLG resolution.
+    table: Table,
 }
 
 impl Prover {
@@ -56,27 +62,32 @@ impl Prover {
         Self {
             uni_op: UnificationOperator::new(),
             nodes: Vec::new(),
-            assignments: Vec::new(),
+            term_assigns: TermAssignments::default(),
             query: ExprId(0),
             query_vars: Vec::new(),
-            queue: VecDeque::new(),
+            query_answers: Vec::new(),
+            queue: NodeQueue::default(),
             temp_var_buf: Map::default(),
             temp_var_int: 0,
+            table: Table::default(),
         }
     }
 
     fn clear(&mut self) {
         self.uni_op.clear();
         self.nodes.clear();
-        self.assignments.clear();
+        self.term_assigns.clear();
         self.query_vars.clear();
+        self.query_answers.clear();
         self.queue.clear();
+        self.table.clear();
     }
 
     pub(crate) fn prove<'a, T: Atom>(
         &'a mut self,
         query: Expr<T>,
-        clause_map: &'a ClauseMap,
+        clauses: &'a IndexMap<Predicate<Integer>, Vec<ClauseId>>,
+        table_clauses: &'a IndexSet<Predicate<Integer>>,
         stor: &'a mut TermStorage<Integer>,
         nimap: &'a mut NameIntMap<T>,
     ) -> ProveCx<'a, T> {
@@ -90,48 +101,109 @@ impl Prover {
 
         stor.get_expr(self.query)
             .with_term(&mut |term: TermView<'_, Integer>| {
-                term.with_variable(&mut |term| self.query_vars.push(term.id));
+                term.with_variable(|term| self.query_vars.push(term.id));
             });
 
-        self.nodes.push(Node {
-            kind: NodeKind::Expr(self.query),
-            uni_delta: 0..0,
-            parent: self.nodes.len(),
-        });
-        self.queue.push_back(0);
+        let node_kind = NodeKind::Expr(self.query);
+        let node_parent = self.nodes.len();
+        self.nodes.push(Node::new(node_kind, node_parent));
+        self.queue.push(0);
 
-        ProveCx::new(self, clause_map, stor, nimap, old_stor_len, old_nimap_state)
+        ProveCx {
+            prover: self,
+            clauses,
+            table_clauses,
+            stor,
+            nimap,
+            old_stor_len,
+            old_nimap_state,
+        }
     }
 
     /// Evaluates the given node with all possible clauses in the clause dataset, then returns
     /// whether a proof search path is complete or not.
     ///
     /// If it reached an end of paths, it returns proof search result within `Some`. The proof
-    /// search result is either true or false, which means the expression in the given node is true
-    /// or not.
+    /// search result is either true or false, which means the expression in the given node is
+    /// evaluted as true or false.
     fn evaluate_node(
         &mut self,
         node_index: usize,
-        clause_map: &ClauseMap,
+        clauses: &IndexMap<Predicate<Integer>, Vec<ClauseId>>,
+        table_clauses: &IndexSet<Predicate<Integer>>,
         stor: &mut TermStorage<Integer>,
     ) -> Option<bool> {
-        let node = self.nodes[node_index].clone();
-        let node_expr = match node.kind {
+        let node_expr = match self.nodes[node_index].kind {
             NodeKind::Expr(expr_id) => expr_id,
             NodeKind::Leaf(eval) => {
-                self.find_assignment(node_index);
+                self.find_assignments(node_index);
+                // On a successful proof, records the answer in the nearest ancestor-owned SLG
+                // table entry, then notifies all waiting consumers.
+                if eval {
+                    self.update_answer_and_notify(node_index, stor);
+                }
                 return Some(eval);
             }
         };
 
-        let predicate = stor.get_expr(node_expr).leftmost_term().predicate();
-        let similar_clauses = if let Some(v) = clause_map.get(&predicate) {
-            v.as_slice()
-        } else {
-            &[]
-        };
+        let node_leftmost = stor.get_expr(node_expr).leftmost_term().id;
+        let node_leftmost_pred = stor.get_term(node_leftmost).predicate();
+        let mut similar_clauses = &[][..];
+        let mut clause_buf: SmallVec<[ClauseId; 1]> = SmallVec::new();
+
+        // === SLG path ===
+        // * Table entry - Created from non-canonical leftmost term of the node. In tabling,
+        //   we use canonical variables for table keys only.
+
+        if table_clauses.contains(&node_leftmost_pred) {
+            let key = canonical::canonicalize_term_id(stor, node_leftmost);
+            if let Some((_, entry)) = self.table.get_mut(&key) {
+                entry.register_consumer(node_index);
+
+                // No answers yet? the node may be woken up by notification.
+                let answer_offset = self.nodes[node_index].table_answer_offset;
+                let answers = entry.answers(answer_offset);
+                if answers.is_empty() {
+                    return None;
+                }
+                let next_offset = answer_offset + 1;
+                self.nodes[node_index].table_answer_offset = next_offset;
+
+                // Synthesizes an answer clause then let this to be unified with the current node.
+                let mut term = stor.get_term_mut(node_leftmost);
+                let vars = term.as_view().collect_variables();
+                for (var, answer) in vars.into_iter().zip(answers) {
+                    term.replace(var, *answer);
+                }
+                clause_buf.push(ClauseId {
+                    head: term.id(),
+                    body: None,
+                });
+                similar_clauses = &clause_buf[..];
+
+                // More answers? We'll handle them next time.
+                if !entry.answers(next_offset).is_empty() {
+                    self.queue.push(node_index);
+                }
+            } else {
+                // First encounter: Just creates a table entry then proceeds with SLD.
+                if let Some(entry) = TableEntry::from_term_view(&stor.get_term(node_leftmost)) {
+                    let index = self.table.register(key, entry);
+                    self.nodes[node_index].table_owner = Some(index);
+                }
+            }
+        }
+
+        // === BFS based SLD path ===
+
+        if similar_clauses.is_empty() {
+            if let Some(v) = clauses.get(&node_leftmost_pred) {
+                similar_clauses = v.as_slice()
+            }
+        }
 
         let old_len = self.nodes.len();
+
         for clause in similar_clauses {
             let head = stor.get_term(clause.head);
 
@@ -147,14 +219,14 @@ impl Prover {
             );
             if let Some(new_node) = self.unify_node_with_clause(node_index, clause, stor) {
                 self.nodes.push(new_node);
-                self.queue.push_back(self.nodes.len() - 1);
+                self.queue.push(self.nodes.len() - 1);
             }
         }
 
         // We may need to apply true or false to the leftmost term of the node expression due to
         // unification failure or exhaustive search.
         // - Unification failure means the leftmost term should be false.
-        // - But we need to consider exhaustive search possibility at the same time.
+        // - But we need to consider exhaustive search at the same time.
 
         let expr = stor.get_expr(node_expr);
         let eval = self.nodes.len() > old_len;
@@ -172,16 +244,13 @@ impl Prover {
 
         if let Some(to) = need_apply {
             let mut expr = stor.get_expr_mut(node_expr);
-            let kind = match expr.apply_to_leftmost_term(to) {
+            let node_kind = match expr.apply_to_leftmost_term(to) {
                 ApplyResult::Expr => NodeKind::Expr(expr.id()),
                 ApplyResult::Complete(eval) => NodeKind::Leaf(eval),
             };
-            self.nodes.push(Node {
-                kind,
-                uni_delta: 0..0,
-                parent: node_index,
-            });
-            self.queue.push_back(self.nodes.len() - 1);
+            let node_parent = node_index;
+            self.nodes.push(Node::new(node_kind, node_parent));
+            self.queue.push(self.nodes.len() - 1);
         }
 
         return None;
@@ -247,6 +316,45 @@ impl Prover {
                                 AssumeResult::Incomplete { lost }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Finds the nearest ancestor node that owns SLG table entry, then updates the entry and
+    /// notifies all waiting consumers.
+    fn update_answer_and_notify(&mut self, node_index: usize, stor: &TermStorage<Integer>) {
+        let tabled_ancestor = {
+            let mut cur = node_index;
+            loop {
+                if self.nodes[cur].table_owner.is_some() {
+                    break Some(cur);
+                }
+                let parent = self.nodes[cur].parent;
+                if parent == cur {
+                    break None;
+                }
+                cur = parent;
+            }
+        };
+
+        if let Some(ancestor) = tabled_ancestor {
+            let table_index = self.nodes[ancestor].table_owner.unwrap();
+            let entry = &mut self.table[table_index];
+            let all_answers_concrete = entry.variables().iter().all(|&var| {
+                if let Some(answer) = self.term_assigns.find(var) {
+                    !stor.get_term(answer).contains_variable()
+                } else {
+                    false
+                }
+            });
+
+            if all_answers_concrete && !entry.has_answer(&self.term_assigns) {
+                entry.update_answer(&self.term_assigns);
+                for i in entry.consumer_nodes() {
+                    if i != node_index {
+                        self.queue.push(i);
                     }
                 }
             }
@@ -328,52 +436,39 @@ impl Prover {
         {
             return None;
         }
-        let (node_expr, clause, uni_delta) = self.uni_op.consume_ops(stor, node_expr, clause);
+        let (node_expr, clause, uni_history) = self.uni_op.consume_ops(stor, node_expr, clause);
 
         if let Some(body) = clause.body {
             let mut lhs = stor.get_expr_mut(node_expr);
             lhs.replace_leftmost_term(body);
-            return Some(Node {
-                kind: NodeKind::Expr(lhs.id()),
-                uni_delta,
-                parent: node_index,
-            });
+            let node_kind = NodeKind::Expr(lhs.id());
+            let node_parent = node_index;
+            let node = Node::new(node_kind, node_parent).with_unification_history(uni_history);
+            return Some(node);
         }
 
         let mut lhs = stor.get_expr_mut(node_expr);
-        let kind = match lhs.apply_to_leftmost_term(true) {
+        let node_kind = match lhs.apply_to_leftmost_term(true) {
             ApplyResult::Expr => NodeKind::Expr(lhs.id()),
             ApplyResult::Complete(eval) => NodeKind::Leaf(eval),
         };
-        Some(Node {
-            kind,
-            uni_delta,
-            parent: node_index,
-        })
+        let node_parent = node_index;
+        let node = Node::new(node_kind, node_parent).with_unification_history(uni_history);
+        Some(node)
     }
 
-    /// Finds all assignments from the given node to the root node.
-    ///
-    /// Then, the assignment information is stored at [`Self::assignments`].
-    fn find_assignment(&mut self, node_index: usize) {
-        // Collects unification records.
-        self.assignments.clear();
+    /// Finds all from/to relations while traversing from the given node to the root node then add
+    /// the relations to [`TermAssignments`].
+    fn find_assignments(&mut self, node_index: usize) {
+        self.term_assigns.clear();
 
         let mut cur_index = node_index;
         loop {
             let node = &self.nodes[cur_index];
-            let range = node.uni_delta.clone();
+            let range = node.uni_history.clone();
 
             for (from, to) in self.uni_op.get_record(range).iter().cloned() {
-                let (from, to) = (from.0, to.0);
-
-                for i in self.assignments.len()..=from.max(to) {
-                    self.assignments.push(i);
-                }
-
-                let root_from = find(&mut self.assignments, from);
-                let root_to = find(&mut self.assignments, to);
-                self.assignments[root_from] = root_to;
+                self.term_assigns.add(from, to);
             }
 
             if node.parent == cur_index {
@@ -381,31 +476,86 @@ impl Prover {
             }
             cur_index = node.parent;
         }
+    }
 
-        return;
-
-        // === Internal helper functions ===
-
-        fn find(buf: &mut [usize], i: usize) -> usize {
-            if buf[i] == i {
-                i
-            } else {
-                let root = find(buf, buf[i]);
-                buf[i] = root;
-                root
-            }
+    /// Records the current proof result as a query answer if it is ground and not duplicated,
+    /// then returns whether a new answer was recorded.
+    fn record_query_answer(&mut self, stor: &mut TermStorage<Integer>) -> bool {
+        let mut answer = Vec::with_capacity(self.query_vars.len());
+        for &var in &self.query_vars {
+            let Some(resolved) = self.materialize_assigned_term(var, stor) else {
+                return false;
+            };
+            answer.push(resolved);
         }
+
+        // no query vars -> empty iter -> all() returns true
+        if self.query_answers.iter().all(|seen| seen != &answer) {
+            self.query_answers.push(answer);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Builds a fully substituted term for a query-side term from `term_assigns`.
+    ///
+    /// Examples:
+    ///
+    /// | assignments         |  input   |  output  |
+    /// | ------------------- | :------: | :------: |
+    /// | `T = Vec(a)`        |   `T`    | `Vec(a)` |
+    /// | `T = a`             | `Vec(T)` | `Vec(a)` |
+    /// | `T = Vec(U), U = a` |   `T`    | `Vec(a)` |
+    /// | `T = Vec(U)`        |   `T`    |  `None`  |
+    ///
+    /// This must materialize the whole term tree, not just rewrite functors in place. The returned
+    /// `TermId` always points to a ground term inserted into `stor`.
+    fn materialize_assigned_term(
+        &self,
+        term_id: TermId,
+        stor: &mut TermStorage<Integer>,
+    ) -> Option<TermId> {
+        let term = stor.get_term(term_id);
+        if term.is_variable() {
+            let resolved = self.term_assigns.find(term_id)?;
+            if resolved == term_id {
+                return None;
+            }
+            return self.materialize_assigned_term(resolved, stor);
+        }
+
+        let functor = *term.functor();
+        let arg_ids = term.args().map(|arg| arg.id).collect::<Vec<_>>();
+        let args = arg_ids
+            .into_iter()
+            .map(|arg_id| {
+                self.materialize_assigned_term(arg_id, stor)
+                    .map(|id| stor.get_term(id).deserialize())
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        let materialized = Term { functor, args };
+        Some(stor.insert_term(materialized))
     }
 }
 
+/// Manages unification operations between a goal(node) and a clause during SLG resolution.
+///
+/// You can make unification operations, [`UnifyOp`]s, by unifying the leftmost term of the goal and
+/// the head of the clause. Append the operations in order to apply them to the whole goal and
+/// clause. You can apply them at once via [`consume_ops`].
+///
+/// [`consume_ops`]: Self::consume_ops
 #[derive(Debug)]
 struct UnificationOperator {
+    /// Buffered unification operations.
     ops: Vec<UnifyOp>,
 
-    /// History of unification.
+    /// Unification history.
     ///
-    /// A pair of term ids means that `pair.0` is assiend to `pair.1`. For example, `(X, a)` means
-    /// `X` is assigned to `a`.
+    /// This is a record of `(from, to)` pairs. It means there has been unification that substitute
+    /// the `from` with `to`. For example, `(X, a)` means the variable `X` was substituted with `a`.
     record: Vec<(TermId, TermId)>,
 }
 
@@ -426,6 +576,13 @@ impl UnificationOperator {
         self.ops.push(op);
     }
 
+    /// Returns
+    /// * `ExprId` - Operation applied `left`
+    /// * `ClauseId` - Operation applied `right`
+    /// * `Range<usize>` - A range of unification history(from/to pairs). You can retrieve the
+    ///   from/to pairs via [`get_record`]
+    ///
+    /// [`get_record`]: Self::get_record
     #[must_use]
     fn consume_ops(
         &mut self,
@@ -464,11 +621,64 @@ impl UnificationOperator {
     }
 }
 
+#[derive(Debug, Default)]
+struct NodeQueue {
+    inner: VecDeque<usize>,
+}
+
+impl NodeQueue {
+    fn clear(&mut self) {
+        self.inner.clear();
+    }
+
+    fn contains(&self, node_index: &usize) -> bool {
+        self.inner.contains(node_index)
+    }
+
+    fn push(&mut self, node_index: usize) {
+        if !self.contains(&node_index) {
+            self.inner.push_back(node_index);
+        }
+    }
+
+    fn pop(&mut self) -> Option<usize> {
+        self.inner.pop_front()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Node {
     kind: NodeKind,
-    uni_delta: Range<usize>,
     parent: usize,
+
+    /// A range of unification history that applied to prove this node:
+    /// Pairs of from([`TermId`]) -> to([`TermId`]).
+    ///
+    /// You can retreive the from/to pairs via [`UnificationOperator::get_record`].
+    uni_history: Range<usize>,
+
+    /// Table entry owned by this node, if this node is the producer of a tabled subgoal.
+    table_owner: Option<TableIndex>,
+
+    /// Number of answers already consumed from a table entry.
+    table_answer_offset: usize,
+}
+
+impl Node {
+    fn new(kind: NodeKind, parent: usize) -> Self {
+        Self {
+            kind,
+            parent,
+            uni_history: 0..0,
+            table_owner: None,
+            table_answer_offset: 0,
+        }
+    }
+
+    fn with_unification_history(mut self, uni_history: Range<usize>) -> Self {
+        self.uni_history = uni_history;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -480,15 +690,75 @@ enum NodeKind {
     Leaf(bool),
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct TermAssignments {
+    /// Union-find from-to relations.
+    ///
+    /// # Examples
+    /// `roots[a]: a` means TermId(a) is not unified with anything.
+    /// `roots[v]: w` means TermId(v) is a variable and it is unified with TermId(w).
+    relations: Vec<TermId>,
+}
+
+impl TermAssignments {
+    pub(crate) fn find(&self, from: TermId) -> Option<TermId> {
+        let to = *self.relations.get(from.0)?;
+        if from == to {
+            Some(to)
+        } else {
+            self.find(to)
+        }
+    }
+
+    pub(crate) fn find_optimize(&mut self, from: TermId) -> TermId {
+        let new_len = from.0 + 1;
+        for i in self.len()..new_len {
+            self.relations.push(TermId(i));
+        }
+
+        let to = self.relations[from.0];
+        if from == to {
+            to
+        } else {
+            let root = self.find_optimize(to);
+            self.relations[from.0] = root;
+            root
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.relations.len()
+    }
+
+    fn clear(&mut self) {
+        self.relations.clear();
+    }
+
+    fn add(&mut self, from: TermId, to: TermId) {
+        let root_from = self.find_optimize(from);
+        let root_to = self.find_optimize(to);
+        self.relations[root_from.0] = root_to;
+    }
+}
+
+/// Unification operation between `node expr - clause's body(expr)`.
 #[derive(Debug)]
 enum UnifyOp {
+    /// Unification operation that rewrites the goal expression on the query side.
+    ///
+    /// Substitues all `from`s in the goal expression with `to`.
     Left { from: TermId, to: TermId },
+
+    /// Unification operation that rewrites the clause body on the clause side.
+    ///
+    /// Substitues all `from`s in the clause's body with `to`.
     Right { from: TermId, to: TermId },
 }
 
 pub struct ProveCx<'a, T: Atom> {
     prover: &'a mut Prover,
-    clause_map: &'a ClauseMap,
+    clauses: &'a IndexMap<Predicate<Integer>, Vec<ClauseId>>,
+    table_clauses: &'a IndexSet<Predicate<Integer>>,
     stor: &'a mut TermStorage<Integer>,
     nimap: &'a mut NameIntMap<T>,
     old_stor_len: TermStorageLen,
@@ -496,37 +766,19 @@ pub struct ProveCx<'a, T: Atom> {
 }
 
 impl<'a, T: Atom> ProveCx<'a, T> {
-    fn new(
-        prover: &'a mut Prover,
-        clause_map: &'a ClauseMap,
-        stor: &'a mut TermStorage<Integer>,
-        nimap: &'a mut NameIntMap<T>,
-        old_stor_len: TermStorageLen,
-        old_nimap_state: NameIntMapState,
-    ) -> Self {
-        Self {
-            prover,
-            clause_map,
-            stor,
-            nimap,
-            old_stor_len,
-            old_nimap_state,
-        }
-    }
-
     pub fn prove_next(&mut self) -> Option<EvalView<'_, T>> {
-        while let Some(node_index) = self.prover.queue.pop_front() {
+        while let Some(node_index) = self.prover.queue.pop() {
             if let Some(proof_result) =
                 self.prover
-                    .evaluate_node(node_index, self.clause_map, self.stor)
+                    .evaluate_node(node_index, self.clauses, self.table_clauses, self.stor)
             {
                 // Returns Some(EvalView) only if the result is TRUE.
-                if proof_result {
+                if proof_result && self.prover.record_query_answer(self.stor) {
                     return Some(EvalView {
                         query_vars: &self.prover.query_vars,
                         terms: &self.stor.terms.buf,
-                        assignments: &self.prover.assignments,
-                        int2name: &self.nimap.int2name,
+                        term_assigns: &self.prover.term_assigns,
+                        nimap: self.nimap,
                         start: 0,
                         end: self.prover.query_vars.len(),
                     });
@@ -551,8 +803,8 @@ impl<T: Atom> Drop for ProveCx<'_, T> {
 pub struct EvalView<'a, T> {
     query_vars: &'a [TermId],
     terms: &'a [TermElem<Integer>],
-    assignments: &'a [usize],
-    int2name: &'a IndexMap<Integer, T>,
+    term_assigns: &'a TermAssignments,
+    nimap: &'a NameIntMap<T>,
     /// Inclusive
     start: usize,
     /// Exclusive
@@ -576,8 +828,8 @@ impl<'a, T> Iterator for EvalView<'a, T> {
             Some(Assignment {
                 buf: self.terms,
                 from,
-                assignments: self.assignments,
-                int2name: self.int2name,
+                term_assigns: self.term_assigns,
+                nimap: self.nimap,
             })
         } else {
             None
@@ -601,70 +853,17 @@ impl<T> iter::FusedIterator for EvalView<'_, T> {}
 pub struct Assignment<'a, T> {
     buf: &'a [TermElem<Integer>],
     from: TermId,
-    assignments: &'a [usize],
-    int2name: &'a IndexMap<Integer, T>,
+    term_assigns: &'a TermAssignments,
+    nimap: &'a NameIntMap<T>,
 }
 
-impl<'a, T: Atom + 'a> Assignment<'a, T> {
-    /// Creates left hand side term of the assignment.
-    ///
-    /// To create a term, this method could allocate memory for the term.
-    pub fn lhs(&self) -> Term<T> {
-        Self::term_view_to_term(self.lhs_view(), self.int2name)
-    }
-
-    /// Creates right hand side term of the assignment.
-    ///
-    /// To create a term, this method could allocate memory for the term.
-    pub fn rhs(&self) -> Term<T> {
-        Self::term_deep_view_to_term(self.rhs_view(), self.int2name)
-    }
-
+impl<'a, T: 'a> Assignment<'a, T> {
     /// Returns left hand side variable name of the assignment.
     ///
     /// Note that assignment's left hand side is always variable.
     pub fn get_lhs_variable(&self) -> &T {
-        let int = self.lhs_view().get_contained_variable().unwrap();
-        self.int2name.get(&int).unwrap()
-    }
-
-    fn term_view_to_term(view: TermView<'_, Integer>, int2name: &IndexMap<Integer, T>) -> Term<T> {
-        let functor = view.functor();
-        let args = view.args();
-
-        let functor = if let Some(name) = int2name.get(functor) {
-            name.clone()
-        } else {
-            unreachable!("integer {:?} has no name mapping", functor)
-        };
-
-        let args = args
-            .into_iter()
-            .map(|arg| Self::term_view_to_term(arg, int2name))
-            .collect();
-
-        Term { functor, args }
-    }
-
-    fn term_deep_view_to_term(
-        view: TermDeepView<'_, Integer>,
-        int2name: &IndexMap<Integer, T>,
-    ) -> Term<T> {
-        let functor = view.functor();
-        let args = view.args();
-
-        let functor = if let Some(name) = int2name.get(functor) {
-            name.clone()
-        } else {
-            unreachable!("integer {:?} has no name mapping", functor)
-        };
-
-        let args = args
-            .into_iter()
-            .map(|arg| Self::term_deep_view_to_term(arg, int2name))
-            .collect();
-
-        Term { functor, args }
+        let int = self.lhs_view().find_variable().unwrap();
+        self.nimap.get_name(&int).unwrap()
     }
 
     const fn lhs_view(&self) -> TermView<'_, Integer> {
@@ -677,28 +876,80 @@ impl<'a, T: Atom + 'a> Assignment<'a, T> {
     const fn rhs_view(&self) -> TermDeepView<'_, Integer> {
         TermDeepView {
             buf: self.buf,
-            links: self.assignments,
+            term_assigns: self.term_assigns,
             id: self.from,
         }
     }
 }
 
+impl<'a, T: Atom + 'a> Assignment<'a, T> {
+    /// Creates left hand side term of the assignment.
+    ///
+    /// To create a term, this method could allocate memory for the term.
+    pub fn lhs(&self) -> Term<T> {
+        Self::term_view_to_term(self.lhs_view(), self.nimap)
+    }
+
+    /// Creates right hand side term of the assignment.
+    ///
+    /// To create a term, this method could allocate memory for the term.
+    pub fn rhs(&self) -> Term<T> {
+        Self::term_deep_view_to_term(self.rhs_view(), self.nimap)
+    }
+
+    fn term_view_to_term(view: TermView<'_, Integer>, nimap: &NameIntMap<T>) -> Term<T> {
+        let functor = view.functor();
+        let args = view.args();
+
+        let functor = if let Some(name) = nimap.get_name(functor) {
+            name.clone()
+        } else {
+            unreachable!("integer {:?} has no name mapping", functor)
+        };
+
+        let args = args
+            .into_iter()
+            .map(|arg| Self::term_view_to_term(arg, nimap))
+            .collect();
+
+        Term { functor, args }
+    }
+
+    fn term_deep_view_to_term(view: TermDeepView<'_, Integer>, nimap: &NameIntMap<T>) -> Term<T> {
+        let functor = view.functor();
+        let args = view.args();
+
+        let functor = if let Some(name) = nimap.get_name(functor) {
+            name.clone()
+        } else {
+            unreachable!("integer {:?} has no name mapping", functor)
+        };
+
+        let args = args
+            .into_iter()
+            .map(|arg| Self::term_deep_view_to_term(arg, nimap))
+            .collect();
+
+        Term { functor, args }
+    }
+}
+
 impl<T: Atom + Display> Display for Assignment<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let view = format::NamedTermView::new(self.lhs_view(), self.int2name);
+        let view = format::NamedTermView::new(self.lhs_view(), self.nimap);
         Display::fmt(&view, f)?;
 
         f.write_str(" = ")?;
 
-        let view = format::NamedTermDeepView::new(self.rhs_view(), self.int2name);
+        let view = format::NamedTermDeepView::new(self.rhs_view(), self.nimap);
         Display::fmt(&view, f)
     }
 }
 
 impl<T: Atom + Debug> Debug for Assignment<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let lhs = format::NamedTermView::new(self.lhs_view(), self.int2name);
-        let rhs = format::NamedTermDeepView::new(self.rhs_view(), self.int2name);
+        let lhs = format::NamedTermView::new(self.lhs_view(), self.nimap);
+        let rhs = format::NamedTermDeepView::new(self.rhs_view(), self.nimap);
 
         f.debug_struct("Assignment")
             .field("lhs", &lhs)
@@ -774,38 +1025,6 @@ impl TermView<'_, Integer> {
             false
         }
     }
-
-    /// Returns true if this term is a variable.
-    ///
-    /// e.g. Terms like `X`, `Y` will return true.
-    fn is_variable(&self) -> bool {
-        self.arity() == 0 && self.functor().is_variable()
-    }
-
-    /// Returns true if this term is a variable or contains variable in it.
-    ///
-    /// e.g. Terms like `X` of `f(X)` will return true.
-    fn contains_variable(&self) -> bool {
-        self.is_variable() || self.args().any(|arg| arg.contains_variable())
-    }
-
-    fn get_contained_variable(&self) -> Option<Integer> {
-        if self.is_variable() {
-            Some(*self.functor())
-        } else {
-            self.args().find_map(|arg| arg.get_contained_variable())
-        }
-    }
-
-    fn with_variable<F: FnMut(&Self)>(&self, f: &mut F) {
-        if self.is_variable() {
-            f(self);
-        } else {
-            for arg in self.args() {
-                arg.with_variable(f);
-            }
-        }
-    }
 }
 
 impl TermViewMut<'_, Integer> {
@@ -828,17 +1047,27 @@ impl Integer {
         Self(index)
     }
 
-    pub(crate) const fn temporary(int: u32) -> Self {
-        Self(int | Self::VAR_FLAG | Self::TEMPORARY_FLAG)
+    pub(crate) fn variable(int: u32) -> Self {
+        let mask = Self::VAR_FLAG;
+        debug_assert_eq!(int & mask, 0);
+        Self(int | mask)
     }
 
-    pub(crate) const fn is_variable(self) -> bool {
-        (Self::VAR_FLAG & self.0) == Self::VAR_FLAG
+    pub(crate) fn temporary(int: u32) -> Self {
+        let mask = Self::VAR_FLAG | Self::TEMPORARY_FLAG;
+        debug_assert_eq!(int & mask, 0);
+        Self(int | mask)
     }
 
     pub(crate) const fn is_temporary_variable(self) -> bool {
-        let mask: u32 = Self::VAR_FLAG | Self::TEMPORARY_FLAG;
+        let mask = Self::VAR_FLAG | Self::TEMPORARY_FLAG;
         (mask & self.0) == mask
+    }
+}
+
+impl Atom for Integer {
+    fn is_variable(&self) -> bool {
+        (Self::VAR_FLAG & self.0) == Self::VAR_FLAG
     }
 }
 
@@ -865,23 +1094,14 @@ impl ops::AddAssign<u32> for Integer {
 
 /// Only mapping of user-input clauses and queries are stored in this map. Auto-generated variables
 /// or something like that are not stored here.
+#[derive(Debug)]
 pub(crate) struct NameIntMap<T> {
-    pub(crate) name2int: IndexMap<T, Integer>,
-    pub(crate) int2name: IndexMap<Integer, T>,
+    name2int: IndexMap<T, Integer>,
+    int2name: IndexMap<Integer, T>,
     next_int: u32,
 }
 
-impl<T: Debug> fmt::Debug for NameIntMap<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("NameIntMap")
-            .field("name2int", &self.name2int)
-            .field("int2name", &self.int2name)
-            .field("next_int", &self.next_int)
-            .finish()
-    }
-}
-
-impl<T: Atom> NameIntMap<T> {
+impl<T> NameIntMap<T> {
     pub(crate) fn new() -> Self {
         Self {
             name2int: IndexMap::default(),
@@ -890,18 +1110,8 @@ impl<T: Atom> NameIntMap<T> {
         }
     }
 
-    pub(crate) fn name_to_int(&mut self, name: T) -> Integer {
-        if let Some(int) = self.name2int.get(&name) {
-            *int
-        } else {
-            let int = Integer::from_value(&name, self.next_int);
-
-            self.name2int.insert(name.clone(), int);
-            self.int2name.insert(int, name);
-
-            self.next_int += 1;
-            int
-        }
+    pub(crate) fn get_name(&self, int: &Integer) -> Option<&T> {
+        self.int2name.get(int)
     }
 
     pub(crate) fn state(&self) -> NameIntMapState {
@@ -926,6 +1136,22 @@ impl<T: Atom> NameIntMap<T> {
     }
 }
 
+impl<T: Atom> NameIntMap<T> {
+    pub(crate) fn name_to_int(&mut self, name: T) -> Integer {
+        if let Some(int) = self.name2int.get(&name) {
+            *int
+        } else {
+            let int = Integer::from_value(&name, self.next_int);
+
+            self.name2int.insert(name.clone(), int);
+            self.int2name.insert(int, name);
+
+            self.next_int += 1;
+            int
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NameIntMapState {
     name2int_len: usize,
@@ -938,20 +1164,26 @@ pub(crate) mod format {
 
     pub struct NamedTermView<'a, T> {
         view: TermView<'a, Integer>,
-        int2name: &'a IndexMap<Integer, T>,
+        nimap: &'a NameIntMap<T>,
+    }
+
+    impl<'a, T> NamedTermView<'a, T> {
+        pub(crate) const fn new(view: TermView<'a, Integer>, nimap: &'a NameIntMap<T>) -> Self {
+            Self { view, nimap }
+        }
+
+        fn args<'s>(&'s self) -> impl Iterator<Item = NamedTermView<'a, T>> + 's {
+            self.view.args().map(|arg| Self {
+                view: arg,
+                nimap: self.nimap,
+            })
+        }
     }
 
     impl<'a, T: Atom> NamedTermView<'a, T> {
-        pub(crate) const fn new(
-            view: TermView<'a, Integer>,
-            int2name: &'a IndexMap<Integer, T>,
-        ) -> Self {
-            Self { view, int2name }
-        }
-
         pub fn is(&self, term: &Term<T>) -> bool {
             let functor = self.view.functor();
-            let Some(functor) = self.int2name.get(functor) else {
+            let Some(functor) = self.nimap.get_name(functor) else {
                 return false;
             };
 
@@ -969,29 +1201,22 @@ pub(crate) mod format {
 
             self.args().any(|arg| arg.contains(term))
         }
-
-        fn args<'s>(&'s self) -> impl Iterator<Item = NamedTermView<'a, T>> + 's {
-            self.view.args().map(|arg| Self {
-                view: arg,
-                int2name: self.int2name,
-            })
-        }
     }
 
-    impl<'a, T: Atom + Display> Display for NamedTermView<'a, T> {
+    impl<'a, T: Display> Display for NamedTermView<'a, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let Self { view, int2name } = self;
+            let Self { view, nimap } = self;
 
             let functor = view.functor();
             let args = view.args();
             let num_args = args.len();
 
-            write_int(functor, int2name, f)?;
+            write_int(functor, nimap, f)?;
 
             if num_args > 0 {
                 f.write_char('(')?;
                 for (i, arg) in args.enumerate() {
-                    fmt::Display::fmt(&Self::new(arg, int2name), f)?;
+                    fmt::Display::fmt(&Self::new(arg, nimap), f)?;
                     if i + 1 < num_args {
                         f.write_str(", ")?;
                     }
@@ -1002,22 +1227,22 @@ pub(crate) mod format {
         }
     }
 
-    impl<'a, T: Atom + Debug> Debug for NamedTermView<'a, T> {
+    impl<'a, T: Debug> Debug for NamedTermView<'a, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let Self { view, int2name } = self;
+            let Self { view, nimap } = self;
 
             let functor = view.functor();
             let args = view.args();
             let num_args = args.len();
 
             if num_args == 0 {
-                if let Some(name) = int2name.get(functor) {
+                if let Some(name) = nimap.get_name(functor) {
                     fmt::Debug::fmt(name, f)
                 } else {
                     fmt::Debug::fmt(functor, f)
                 }
             } else {
-                let name_str = if let Some(name) = int2name.get(functor) {
+                let name_str = if let Some(name) = nimap.get_name(functor) {
                     format!("{:?}", name)
                 } else {
                     format!("{:?}", functor)
@@ -1025,7 +1250,7 @@ pub(crate) mod format {
                 let mut d = f.debug_tuple(&name_str);
 
                 for arg in args {
-                    d.field(&Self::new(arg, int2name));
+                    d.field(&Self::new(arg, nimap));
                 }
                 d.finish()
             }
@@ -1034,32 +1259,29 @@ pub(crate) mod format {
 
     pub(crate) struct NamedTermDeepView<'a, T> {
         view: TermDeepView<'a, Integer>,
-        int2name: &'a IndexMap<Integer, T>,
+        nimap: &'a NameIntMap<T>,
     }
 
     impl<'a, T> NamedTermDeepView<'a, T> {
-        pub(crate) const fn new(
-            view: TermDeepView<'a, Integer>,
-            int2name: &'a IndexMap<Integer, T>,
-        ) -> Self {
-            Self { view, int2name }
+        pub(crate) const fn new(view: TermDeepView<'a, Integer>, nimap: &'a NameIntMap<T>) -> Self {
+            Self { view, nimap }
         }
     }
 
     impl<'a, T: Display> Display for NamedTermDeepView<'a, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let Self { view, int2name } = self;
+            let Self { view, nimap } = self;
 
             let functor = view.functor();
             let args = view.args();
             let num_args = args.len();
 
-            write_int(functor, int2name, f)?;
+            write_int(functor, nimap, f)?;
 
             if num_args > 0 {
                 f.write_char('(')?;
                 for (i, arg) in args.enumerate() {
-                    fmt::Display::fmt(&Self::new(arg, int2name), f)?;
+                    fmt::Display::fmt(&Self::new(arg, nimap), f)?;
                     if i + 1 < num_args {
                         f.write_str(", ")?;
                     }
@@ -1072,20 +1294,20 @@ pub(crate) mod format {
 
     impl<'a, T: Debug> Debug for NamedTermDeepView<'a, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let Self { view, int2name } = self;
+            let Self { view, nimap } = self;
 
             let functor = view.functor();
             let args = view.args();
             let num_args = args.len();
 
             if num_args == 0 {
-                if let Some(name) = int2name.get(functor) {
+                if let Some(name) = nimap.get_name(functor) {
                     fmt::Debug::fmt(name, f)
                 } else {
                     fmt::Debug::fmt(functor, f)
                 }
             } else {
-                let name_str = if let Some(name) = int2name.get(functor) {
+                let name_str = if let Some(name) = nimap.get_name(functor) {
                     format!("{:?}", name)
                 } else {
                     format!("{:?}", functor)
@@ -1093,7 +1315,7 @@ pub(crate) mod format {
                 let mut d = f.debug_tuple(&name_str);
 
                 for arg in args {
-                    d.field(&Self::new(arg, int2name));
+                    d.field(&Self::new(arg, nimap));
                 }
                 d.finish()
             }
@@ -1102,33 +1324,32 @@ pub(crate) mod format {
 
     pub struct NamedExprView<'a, T> {
         view: ExprView<'a, Integer>,
-        int2name: &'a IndexMap<Integer, T>,
+        nimap: &'a NameIntMap<T>,
+    }
+
+    impl<'a, T> NamedExprView<'a, T> {
+        pub(crate) const fn new(view: ExprView<'a, Integer>, nimap: &'a NameIntMap<T>) -> Self {
+            Self { view, nimap }
+        }
     }
 
     impl<'a, T: Atom> NamedExprView<'a, T> {
-        pub(crate) const fn new(
-            view: ExprView<'a, Integer>,
-            int2name: &'a IndexMap<Integer, T>,
-        ) -> Self {
-            Self { view, int2name }
-        }
-
         pub fn contains_term(&self, term: &Term<T>) -> bool {
             match self.view.as_kind() {
                 ExprKind::Term(view) => NamedTermView {
                     view,
-                    int2name: self.int2name,
+                    nimap: self.nimap,
                 }
                 .contains(term),
                 ExprKind::Not(view) => NamedExprView {
                     view,
-                    int2name: self.int2name,
+                    nimap: self.nimap,
                 }
                 .contains_term(term),
                 ExprKind::And(args) | ExprKind::Or(args) => args.into_iter().any(|view| {
                     NamedExprView {
                         view,
-                        int2name: self.int2name,
+                        nimap: self.nimap,
                     }
                     .contains_term(term)
                 }),
@@ -1136,26 +1357,20 @@ pub(crate) mod format {
         }
     }
 
-    impl<'a, T: Atom + Display> Display for NamedExprView<'a, T> {
+    impl<'a, T: Display> Display for NamedExprView<'a, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let Self { view, int2name } = self;
+            let Self { view, nimap } = self;
 
             match view.as_kind() {
-                ExprKind::Term(term) => fmt::Display::fmt(
-                    &NamedTermView {
-                        view: term,
-                        int2name,
-                    },
-                    f,
-                )?,
+                ExprKind::Term(term) => fmt::Display::fmt(&NamedTermView { view: term, nimap }, f)?,
                 ExprKind::Not(inner) => {
                     f.write_str("\\+ ")?;
                     if matches!(inner.as_kind(), ExprKind::And(_) | ExprKind::Or(_)) {
                         f.write_char('(')?;
-                        fmt::Display::fmt(&Self::new(inner, int2name), f)?;
+                        fmt::Display::fmt(&Self::new(inner, nimap), f)?;
                         f.write_char(')')?;
                     } else {
-                        fmt::Display::fmt(&Self::new(inner, int2name), f)?;
+                        fmt::Display::fmt(&Self::new(inner, nimap), f)?;
                     }
                 }
                 ExprKind::And(args) => {
@@ -1163,10 +1378,10 @@ pub(crate) mod format {
                     for (i, arg) in args.enumerate() {
                         if matches!(arg.as_kind(), ExprKind::Or(_)) {
                             f.write_char('(')?;
-                            fmt::Display::fmt(&Self::new(arg, int2name), f)?;
+                            fmt::Display::fmt(&Self::new(arg, nimap), f)?;
                             f.write_char(')')?;
                         } else {
-                            fmt::Display::fmt(&Self::new(arg, int2name), f)?;
+                            fmt::Display::fmt(&Self::new(arg, nimap), f)?;
                         }
                         if i + 1 < num_args {
                             f.write_str(", ")?;
@@ -1176,7 +1391,7 @@ pub(crate) mod format {
                 ExprKind::Or(args) => {
                     let num_args = args.len();
                     for (i, arg) in args.enumerate() {
-                        fmt::Display::fmt(&Self::new(arg, int2name), f)?;
+                        fmt::Display::fmt(&Self::new(arg, nimap), f)?;
                         if i + 1 < num_args {
                             f.write_str("; ")?;
                         }
@@ -1187,27 +1402,27 @@ pub(crate) mod format {
         }
     }
 
-    impl<'a, T: Atom + Debug> Debug for NamedExprView<'a, T> {
+    impl<'a, T: Debug> Debug for NamedExprView<'a, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let Self { view, int2name } = self;
+            let Self { view, nimap } = self;
 
             match view.as_kind() {
-                ExprKind::Term(term) => fmt::Debug::fmt(&NamedTermView::new(term, int2name), f),
+                ExprKind::Term(term) => fmt::Debug::fmt(&NamedTermView::new(term, nimap), f),
                 ExprKind::Not(inner) => f
                     .debug_tuple("Not")
-                    .field(&NamedExprView::new(inner, int2name))
+                    .field(&NamedExprView::new(inner, nimap))
                     .finish(),
                 ExprKind::And(args) => {
                     let mut d = f.debug_tuple("And");
                     for arg in args {
-                        d.field(&NamedExprView::new(arg, int2name));
+                        d.field(&NamedExprView::new(arg, nimap));
                     }
                     d.finish()
                 }
                 ExprKind::Or(args) => {
                     let mut d = f.debug_tuple("Or");
                     for arg in args {
-                        d.field(&NamedExprView::new(arg, int2name));
+                        d.field(&NamedExprView::new(arg, nimap));
                     }
                     d.finish()
                 }
@@ -1217,10 +1432,10 @@ pub(crate) mod format {
 
     fn write_int<T: fmt::Display>(
         int: &Integer,
-        map: &IndexMap<Integer, T>,
+        nimap: &NameIntMap<T>,
         f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
-        if let Some(name) = map.get(int) {
+        if let Some(name) = nimap.get_name(int) {
             fmt::Display::fmt(name, f)
         } else {
             fmt::Debug::fmt(int, f)

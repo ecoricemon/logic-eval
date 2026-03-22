@@ -3,7 +3,7 @@ use super::{
     CloseParenToken, CommaToken, DotToken, HornToken, Ident, NegationToken, OpenParenToken, Parse,
     ParseBuffer,
 };
-use crate::{Atom, ClauseDatasetIn, ClauseIn, Error, ExprIn, Intern, NameIn, Result, TermIn};
+use crate::{ClauseDatasetIn, ClauseIn, Error, ExprIn, Intern, NameIn, Result, TermIn};
 use std::{
     borrow::Borrow,
     fmt::{self, Debug, Display},
@@ -225,12 +225,6 @@ impl Name<()> {
         assert!(!s.is_empty());
         let interned = interner.intern_str(s);
         Name(interned)
-    }
-}
-
-impl<T: Atom> Name<T> {
-    pub(crate) fn is_variable(&self) -> bool {
-        self.0.is_variable()
     }
 }
 

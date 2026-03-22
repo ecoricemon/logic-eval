@@ -6,7 +6,7 @@ mod prove;
 // === Re-exports ===
 
 pub use parse::{
-    common::{Intern, InternedStr, StrCanonicalizer, StrInterner},
+    common::{Intern, InternedStr, StrInterner},
     inner::VAR_PREFIX,
     inner::{parse_str, Parse},
     repr::{Clause, ClauseDataset, Expr, Predicate, Term},
@@ -37,15 +37,16 @@ mod intern_alias {
     pub(crate) type ClauseDatasetIn<'int, Int> = parse::repr::ClauseDataset<NameIn<'int, Int>>;
 }
 
-// === Hash map and set used within this crate ===
+pub(crate) type Map<K, V> = fxhash::FxHashMap<K, V>;
+pub(crate) type IndexMap<K, V> = indexmap::IndexMap<K, V, fxhash::FxBuildHasher>;
+pub(crate) type IndexSet<T> = indexmap::IndexSet<T, fxhash::FxBuildHasher>;
+pub(crate) type PassThroughIndexMap<K, V> = indexmap::IndexMap<K, V, PassThroughState>;
 
 use std::{
     error::Error as StdError,
     hash::{BuildHasherDefault, Hasher},
     result::Result as StdResult,
 };
-
-pub(crate) type Map<K, V> = fxhash::FxHashMap<K, V>;
 
 #[derive(Default, Clone, Copy)]
 struct PassThroughHasher {

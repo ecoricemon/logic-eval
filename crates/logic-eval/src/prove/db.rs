@@ -11,20 +11,22 @@ use crate::{
         VAR_PREFIX,
     },
     prove::repr::{ExprKind, ExprView, TermView, TermViewIter},
-    Atom, Map,
+    Atom, IndexMap, IndexSet, Map,
 };
 use core::{
     fmt::{self, Debug, Display, Write},
     iter::FusedIterator,
 };
-use indexmap::{IndexMap, IndexSet};
 
 pub struct Database<T> {
     /// Clause id dataset.
     clauses: IndexMap<Predicate<Integer>, Vec<ClauseId>>,
 
-    /// We do not allow duplicated clauses in the dataset.
-    clause_set: IndexSet<Clause<T>>,
+    /// Clauses that should be handled by tabling.
+    table_clauses: IndexSet<Predicate<Integer>>,
+
+    /// We do not allow duplicate clauses in the dataset.
+    dup_checker: DuplicateClauseChecker,
 
     /// Term and expression storage.
     stor: TermStorage<Integer>,
@@ -48,7 +50,8 @@ impl<T: Atom> Database<T> {
     pub fn new() -> Self {
         Self {
             clauses: IndexMap::default(),
-            clause_set: IndexSet::default(),
+            table_clauses: IndexSet::default(),
+            dup_checker: DuplicateClauseChecker::default(),
             stor: TermStorage::new(),
             prover: Prover::new(),
             nimap: NameIntMap::new(),
@@ -59,7 +62,7 @@ impl<T: Atom> Database<T> {
     pub fn terms(&self) -> NamedTermViewIter<'_, T> {
         NamedTermViewIter {
             term_iter: self.stor.terms.terms(),
-            int2name: &self.nimap.int2name,
+            nimap: &self.nimap,
         }
     }
 
@@ -67,7 +70,7 @@ impl<T: Atom> Database<T> {
         ClauseIter {
             clauses: &self.clauses,
             stor: &self.stor,
-            int2name: &self.nimap.int2name,
+            nimap: &self.nimap,
             i: 0,
             j: 0,
         }
@@ -79,18 +82,24 @@ impl<T: Atom> Database<T> {
         }
     }
 
+    /// Inserts the given clause to the DB.
     pub fn insert_clause(&mut self, clause: Clause<T>) {
         // Saves current state. We will revert DB when the change is not committed.
         if self.revert_point.is_none() {
             self.revert_point = Some(self.state());
         }
 
-        // If the DB already contains the given clause, then returns.
-        if !self.clause_set.insert(clause.clone()) {
-            return;
+        let clause = clause.map(&mut |t| self.nimap.name_to_int(t));
+
+        // Records whether the clause needs tabling.
+        if clause.needs_tabling() {
+            self.table_clauses.insert(clause.head.predicate());
         }
 
-        let clause = clause.map(&mut |t| self.nimap.name_to_int(t));
+        // If the DB already contains the given clause, then returns.
+        if !self.dup_checker.insert(clause.clone()) {
+            return;
+        }
 
         let key = clause.head.predicate();
         let value = ClauseId {
@@ -114,8 +123,13 @@ impl<T: Atom> Database<T> {
             self.revert(revert_point);
         }
 
-        self.prover
-            .prove(expr, &self.clauses, &mut self.stor, &mut self.nimap)
+        self.prover.prove(
+            expr,
+            &self.clauses,
+            &self.table_clauses,
+            &mut self.stor,
+            &mut self.nimap,
+        )
     }
 
     pub fn commit(&mut self) {
@@ -135,7 +149,7 @@ impl<T: Atom> Database<T> {
         let mut conv_map = ConversionMap {
             int_to_str: Map::default(),
             sanitized_to_suffix: Map::default(),
-            int2name: &self.nimap.int2name,
+            nimap: &self.nimap,
             sanitizer: sanitize,
         };
 
@@ -163,7 +177,7 @@ impl<T: Atom> Database<T> {
             int_to_str: Map<Integer, String>,
             // e.g. 0 -> No suffix, 1 -> _1, 2 -> _2, ...
             sanitized_to_suffix: Map<&'a str, u32>,
-            int2name: &'a IndexMap<Integer, T>,
+            nimap: &'a NameIntMap<T>,
             sanitizer: F,
         }
 
@@ -174,7 +188,7 @@ impl<T: Atom> Database<T> {
         {
             fn int_to_str(&mut self, int: Integer) -> &str {
                 self.int_to_str.entry(int).or_insert_with(|| {
-                    let name = self.int2name.get(&int).unwrap();
+                    let name = self.nimap.get_name(&int).unwrap();
                     let name: &str = name.as_ref();
 
                     let mut is_var = false;
@@ -311,7 +325,7 @@ impl<T: Atom> Database<T> {
         for (i, len) in clauses_len.into_iter().enumerate() {
             self.clauses[i].truncate(len);
         }
-        self.clause_set.truncate(clause_set_len);
+        self.dup_checker.truncate(clause_set_len);
         self.stor.truncate(stor_len);
         self.nimap.revert(nimap_state);
         // `self.prover: Prover` does not store any persistent data.
@@ -320,7 +334,7 @@ impl<T: Atom> Database<T> {
     fn state(&self) -> DatabaseState {
         DatabaseState {
             clauses_len: self.clauses.values().map(|v| v.len()).collect(),
-            clause_set_len: self.clause_set.len(),
+            clause_set_len: self.dup_checker.len(),
             stor_len: self.stor.len(),
             nimap_state: self.nimap.state(),
         }
@@ -337,7 +351,7 @@ impl<T: Debug> Debug for Database<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Database")
             .field("clauses", &self.clauses)
-            .field("clause_set", &self.clause_set)
+            .field("dup_checker", &self.dup_checker)
             .field("stor", &self.stor)
             .field("nimap", &self.nimap)
             .field("revert_point", &self.revert_point)
@@ -351,6 +365,45 @@ struct DatabaseState {
     clause_set_len: usize,
     stor_len: TermStorageLen,
     nimap_state: NameIntMapState,
+}
+
+#[derive(Debug, Default)]
+struct DuplicateClauseChecker {
+    seen: IndexSet<Clause<Integer>>,
+
+    /// Temporary buffer for granting [`Integer`] to variables.
+    vars: Vec<Integer>,
+}
+
+impl DuplicateClauseChecker {
+    /// Returns true if the given clause is new, has not been seen before.
+    fn insert(&mut self, clause: Clause<Integer>) -> bool {
+        let canonical_clause = clause.map(&mut |t| {
+            if !t.is_variable() {
+                t
+            } else {
+                if let Some(found) = self.vars.iter().find(|&&var| var == t) {
+                    *found
+                } else {
+                    let next_int = self.vars.len() as u32;
+                    let int = Integer::variable(next_int);
+                    self.vars.push(int);
+                    int
+                }
+            }
+        });
+        let is_new = self.seen.insert(canonical_clause);
+        self.vars.clear();
+        is_new
+    }
+
+    fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.seen.truncate(len);
+    }
 }
 
 /// Turns variables into `_$0`, `_$1`, and so on using the given canonical_var function.
@@ -397,9 +450,9 @@ fn _convert_var_into_num<T: Atom>(
 
     fn find_var_in_expr<T: Atom>(expr: &Expr<T>) -> Option<T> {
         match expr {
-            Expr::Term(t) => find_var_in_term(t),
-            Expr::Not(e) => find_var_in_expr(e),
-            Expr::And(v) | Expr::Or(v) => v.iter().find_map(find_var_in_expr),
+            Expr::Term(term) => find_var_in_term(term),
+            Expr::Not(arg) => find_var_in_expr(arg),
+            Expr::And(args) | Expr::Or(args) => args.iter().find_map(find_var_in_expr),
         }
     }
 
@@ -416,7 +469,7 @@ fn _convert_var_into_num<T: Atom>(
 pub struct ClauseIter<'a, T> {
     clauses: &'a IndexMap<Predicate<Integer>, Vec<ClauseId>>,
     stor: &'a TermStorage<Integer>,
-    int2name: &'a IndexMap<Integer, T>,
+    nimap: &'a NameIntMap<T>,
     i: usize,
     j: usize,
 }
@@ -440,7 +493,7 @@ impl<'a, T> Iterator for ClauseIter<'a, T> {
         Some(ClauseRef {
             id,
             stor: self.stor,
-            int2name: self.int2name,
+            nimap: self.nimap,
         })
     }
 }
@@ -450,19 +503,19 @@ impl<T> FusedIterator for ClauseIter<'_, T> {}
 pub struct ClauseRef<'a, T> {
     id: ClauseId,
     stor: &'a TermStorage<Integer>,
-    int2name: &'a IndexMap<Integer, T>,
+    nimap: &'a NameIntMap<T>,
 }
 
 impl<'a, T: Atom> ClauseRef<'a, T> {
     pub fn head(&self) -> NamedTermView<'a, T> {
         let head = self.stor.get_term(self.id.head);
-        NamedTermView::new(head, self.int2name)
+        NamedTermView::new(head, self.nimap)
     }
 
     pub fn body(&self) -> Option<NamedExprView<'a, T>> {
         self.id.body.map(|id| {
             let body = self.stor.get_expr(id);
-            NamedExprView::new(body, self.int2name)
+            NamedExprView::new(body, self.nimap)
         })
     }
 }
@@ -485,11 +538,11 @@ impl<T: Atom + Debug> Debug for ClauseRef<'_, T> {
         let mut d = f.debug_struct("Clause");
 
         let head = self.stor.get_term(self.id.head);
-        d.field("head", &NamedTermView::new(head, self.int2name));
+        d.field("head", &NamedTermView::new(head, self.nimap));
 
         if let Some(body) = self.id.body {
             let body = self.stor.get_expr(body);
-            d.field("body", &NamedExprView::new(body, self.int2name));
+            d.field("body", &NamedExprView::new(body, self.nimap));
         }
 
         d.finish()
@@ -498,7 +551,7 @@ impl<T: Atom + Debug> Debug for ClauseRef<'_, T> {
 
 pub struct NamedTermViewIter<'a, T> {
     term_iter: TermViewIter<'a, Integer>,
-    int2name: &'a IndexMap<Integer, T>,
+    nimap: &'a NameIntMap<T>,
 }
 
 impl<'a, T: Atom> Iterator for NamedTermViewIter<'a, T> {
@@ -507,7 +560,7 @@ impl<'a, T: Atom> Iterator for NamedTermViewIter<'a, T> {
     fn next(&mut self) -> Option<Self::Item> {
         self.term_iter
             .next()
-            .map(|view| NamedTermView::new(view, self.int2name))
+            .map(|view| NamedTermView::new(view, self.nimap))
     }
 }
 
@@ -703,6 +756,79 @@ mod str_atom_tests {
         );
 
         let query: Expr<'_> = parse::parse_str("descend($X, $Y).", &interner).unwrap();
+        let mut answer = collect_answer(db.query(query));
+
+        let mut expected = [
+            ["$X = a", "$Y = b"],
+            ["$X = a", "$Y = c"],
+            ["$X = a", "$Y = d"],
+            ["$X = b", "$Y = c"],
+            ["$X = b", "$Y = d"],
+            ["$X = c", "$Y = d"],
+        ];
+
+        answer.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(answer, expected);
+    }
+
+    // SLG resolution (tabling) is required to pass this test.
+    #[test]
+    fn test_mid_recursion() {
+        let mut db = Database::new();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            edge(a, b).
+            edge(b, c).
+            edge(c, a).
+            path($X, $Y) :- edge($X, $Z), path($Z, $W), edge($W, $Y).
+            path($X, $Y) :- edge($X, $Y).
+            ",
+        );
+
+        let query: Expr<'_> = parse::parse_str("path($X, $Y).", &interner).unwrap();
+        let mut answer = collect_answer(db.query(query));
+
+        let mut expected = [
+            ["$X = a", "$Y = a"],
+            ["$X = a", "$Y = b"],
+            ["$X = a", "$Y = c"],
+            ["$X = b", "$Y = a"],
+            ["$X = b", "$Y = b"],
+            ["$X = b", "$Y = c"],
+            ["$X = c", "$Y = a"],
+            ["$X = c", "$Y = b"],
+            ["$X = c", "$Y = c"],
+        ];
+
+        answer.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(answer, expected);
+    }
+
+    // SLG resolution (tabling) is required to pass this test.
+    #[test]
+    fn test_left_recursion() {
+        let mut db = Database::new();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            parent(a, b).
+            parent(b, c).
+            parent(c, d).
+            ancestor($X, $Y) :- ancestor($X, $Z), parent($Z, $Y).
+            ancestor($X, $Y) :- parent($X, $Y).
+            ",
+        );
+
+        let query: Expr<'_> = parse::parse_str("ancestor($X, $Y).", &interner).unwrap();
         let mut answer = collect_answer(db.query(query));
 
         let mut expected = [
