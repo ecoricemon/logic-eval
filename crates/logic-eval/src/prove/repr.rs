@@ -1,6 +1,5 @@
-use crate::{Expr, PassThroughState, Predicate, Term};
+use crate::{prove::prover::TermAssignments, Atom, Expr, PassThroughIndexMap, Predicate, Term};
 use fxhash::FxHasher;
-use indexmap::IndexMap;
 use std::{
     hash::{Hash, Hasher},
     iter, ops,
@@ -16,12 +15,6 @@ pub(crate) struct ClauseId {
 pub(crate) struct TermStorage<T> {
     pub(crate) exprs: ExprArray,
     pub(crate) terms: UniqueTermArray<T>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TermStorageLen {
-    expr_len: usize,
-    term_len: TermArrayLen,
 }
 
 impl<T> TermStorage<T> {
@@ -71,6 +64,12 @@ impl<T: Clone + Eq + Hash> TermStorage<T> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TermStorageLen {
+    expr_len: usize,
+    term_len: TermArrayLen,
+}
+
 #[derive(Debug)]
 pub(crate) struct ExprArray {
     buf: Vec<ExprElem>,
@@ -114,31 +113,31 @@ impl ExprArray {
                 self.buf.push(elem);
                 id
             }
-            Expr::Not(expr) => {
+            Expr::Not(arg) => {
                 let idx = self.reserve(1);
-                let inner_id = self.insert(*expr, term_arr);
+                let inner_id = self.insert(*arg, term_arr);
                 self.buf[idx] = ExprElem::Not(inner_id);
                 ExprId(idx)
             }
-            Expr::And(exprs) => {
-                let num_args = exprs.len();
+            Expr::And(args) => {
+                let num_args = args.len();
                 let idx = self.reserve(1 + num_args);
 
                 self.buf[idx] = ExprElem::And { len: num_args };
-                for (i, expr) in exprs.into_iter().enumerate() {
-                    let arg_id = self.insert(expr, term_arr);
+                for (i, arg) in args.into_iter().enumerate() {
+                    let arg_id = self.insert(arg, term_arr);
                     self.buf[idx + 1 + i] = ExprElem::Expr(arg_id);
                 }
 
                 ExprId(idx)
             }
-            Expr::Or(exprs) => {
-                let num_args = exprs.len();
+            Expr::Or(args) => {
+                let num_args = args.len();
                 let idx = self.reserve(1 + num_args);
 
                 self.buf[idx] = ExprElem::Or { len: num_args };
-                for (i, expr) in exprs.into_iter().enumerate() {
-                    let arg_id = self.insert(expr, term_arr);
+                for (i, arg) in args.into_iter().enumerate() {
+                    let arg_id = self.insert(arg, term_arr);
                     self.buf[idx + 1 + i] = ExprElem::Expr(arg_id);
                 }
 
@@ -355,6 +354,44 @@ impl<'a, T> ExprViewMut<'a, T> {
         self.id
     }
 
+    pub(crate) fn with_terminal<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&mut UniqueTermArray<T>, TermId),
+    {
+        fn helper<'a, T, F>(this: &mut ExprViewMut<'a, T>, f: &mut F)
+        where
+            F: FnMut(&mut UniqueTermArray<T>, TermId),
+        {
+            this.find_then_move();
+
+            match this.exprs[this.id] {
+                ExprElem::Term(term) => {
+                    TermViewMut {
+                        arr: this.terms,
+                        id: term,
+                    }
+                    .with_terminal(f);
+                }
+                ExprElem::Not(inner) => {
+                    let org = this.id;
+                    this.id = inner;
+                    helper(this, f);
+                    this.id = org;
+                }
+                ExprElem::And { len } | ExprElem::Or { len } => {
+                    let org = this.id;
+                    for _ in 0..len {
+                        this.id += 1;
+                        helper(this, f);
+                    }
+                    this.id = org;
+                }
+                ExprElem::Expr(_) => unreachable!(),
+            }
+        }
+        helper(self, &mut f)
+    }
+
     /// Finds the destination of jump (Elem::Expr) chain then moves this view to the final
     /// expression.
     fn find_then_move(&mut self) {
@@ -368,38 +405,6 @@ impl<'a, T> ExprViewMut<'a, T> {
             dst
         } else {
             src
-        }
-    }
-
-    pub(crate) fn with_terminal<F>(&mut self, f: &mut F)
-    where
-        F: FnMut(&mut UniqueTermArray<T>, TermId),
-    {
-        self.find_then_move();
-
-        match self.exprs[self.id] {
-            ExprElem::Term(term) => {
-                TermViewMut {
-                    arr: self.terms,
-                    id: term,
-                }
-                .with_terminal(f);
-            }
-            ExprElem::Not(inner) => {
-                let org = self.id;
-                self.id = inner;
-                self.with_terminal(f);
-                self.id = org;
-            }
-            ExprElem::And { len } | ExprElem::Or { len } => {
-                let org = self.id;
-                for _ in 0..len {
-                    self.id += 1;
-                    self.with_terminal(f);
-                }
-                self.id = org;
-            }
-            ExprElem::Expr(_) => unreachable!(),
         }
     }
 }
@@ -616,7 +621,7 @@ impl<'a, T: Clone> ExprViewMut<'a, T> {
     }
 }
 
-impl<'a, T: Clone + Eq + Hash> ExprViewMut<'a, T> {
+impl<'a, T: Atom> ExprViewMut<'a, T> {
     /// If this expression contains `from`, then replaces them to `to` in a clone-on-write way.
     ///
     /// If the replacement took place, then a new expression is created then this view becomes to
@@ -701,14 +706,14 @@ pub(crate) struct UniqueTermArray<T> {
     ///
     /// You are encouraged to call two methods below to access this field, [`Self::add_mapping`] and
     /// [`Self::get_similar`], which hide the problem.
-    pub(crate) map: IndexMap<u64, Vec<TermId>, PassThroughState>,
+    pub(crate) map: PassThroughIndexMap<u64, Vec<TermId>>,
 }
 
 impl<T> UniqueTermArray<T> {
     fn new() -> Self {
         Self {
             buf: Vec::new(),
-            map: IndexMap::default(),
+            map: PassThroughIndexMap::default(),
         }
     }
 
@@ -770,6 +775,28 @@ impl<T: Clone + Eq + Hash + PartialEq> UniqueTermArray<T> {
             hash,
             cur: 0,
         }
+    }
+
+    /// If there's no structurally identical term in the array, then returns Ok with the `new_id`.
+    /// Otherwise, returns Err with exisging id.
+    ///
+    /// If result is Ok, then registers the `new_id` in the map.
+    fn try_register_unique_term(&mut self, new_id: TermId) -> Result<TermId, TermId> {
+        let hash = buf_term_hash(&self.buf, new_id);
+        let dup = 'search: {
+            for existing_id in Self::get_similar(self.map.get_mut(&hash), &self.buf, hash) {
+                if existing_id != new_id && structually_eq(&self.buf, existing_id, new_id) {
+                    break 'search Some(existing_id);
+                }
+            }
+            None
+        };
+        if let Some(existing_id) = dup {
+            return Err(existing_id);
+        }
+
+        self.add_mapping(hash, new_id);
+        Ok(new_id)
     }
 
     pub(crate) fn insert(&mut self, term: Term<T>) -> TermId {
@@ -948,6 +975,74 @@ impl<T: Clone> TermView<'_, T> {
             arity: self.arity(),
         }
     }
+
+    pub(crate) fn deserialize(self) -> Term<T> {
+        Term {
+            functor: self.functor().clone(),
+            args: self.args().map(Self::deserialize).collect(),
+        }
+    }
+}
+
+impl<T: Atom> TermView<'_, T> {
+    /// Returns true if this term is a variable.
+    ///
+    /// e.g. Terms like `X`, `Y` will return true.
+    pub(crate) fn is_variable(&self) -> bool {
+        let is_var = self.functor().is_variable();
+
+        #[cfg(debug_assertions)]
+        if is_var {
+            assert_eq!(self.arity(), 0);
+        }
+
+        is_var
+    }
+
+    /// Returns true if this term is a variable or contains variable in it.
+    ///
+    /// e.g. Terms like `X` of `f(X)` will return true.
+    pub(crate) fn contains_variable(&self) -> bool {
+        self.is_variable() || self.args().any(|arg| arg.contains_variable())
+    }
+
+    pub(crate) fn with_variable<F: FnMut(&Self)>(&self, mut f: F) {
+        fn helper<'a, T, F>(view: &TermView<'a, T>, f: &mut F)
+        where
+            T: Atom,
+            F: FnMut(&TermView<'a, T>),
+        {
+            if view.is_variable() {
+                f(view);
+            } else {
+                for arg in view.args() {
+                    helper(&arg, f);
+                }
+            }
+        }
+        helper(self, &mut f)
+    }
+
+    pub(crate) fn collect_variables(&self) -> Vec<TermId> {
+        let mut vars = Vec::new();
+        self.with_variable(|var| {
+            if !vars.contains(&var.id) {
+                vars.push(var.id);
+            }
+        });
+        vars
+    }
+}
+
+impl<T: Atom + Copy> TermView<'_, T> {
+    /// Returns the first variable functor in this term.
+    pub(crate) fn find_variable(&self) -> Option<T> {
+        if self.is_variable() {
+            Some(*self.functor())
+        } else {
+            self.args().find_map(|arg| arg.find_variable())
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -997,7 +1092,7 @@ impl<T> iter::FusedIterator for TermViewArgs<'_, T> {}
 #[derive(Debug, Clone)]
 pub struct TermDeepView<'a, T> {
     pub(crate) buf: &'a [TermElem<T>],
-    pub(crate) links: &'a [usize],
+    pub(crate) term_assigns: &'a TermAssignments,
     pub(crate) id: TermId,
 }
 
@@ -1027,26 +1122,18 @@ impl<'a, T> TermDeepView<'a, T> {
         let end = start + view.arity() as usize;
         TermDeepViewArgs {
             buf: view.buf,
-            links: view.links,
+            term_assigns: view.term_assigns,
             start,
             end,
         }
     }
 
     pub(crate) fn jump(&self) -> Self {
-        let mut i = self.id.0;
-
-        while let Some(next) = self.links.get(i) {
-            if i == *next {
-                break;
-            }
-            i = *next;
-        }
-
+        let root = self.term_assigns.find(self.id).unwrap_or(self.id);
         Self {
             buf: self.buf,
-            links: self.links,
-            id: TermId(i),
+            term_assigns: self.term_assigns,
+            id: root,
         }
     }
 }
@@ -1054,7 +1141,7 @@ impl<'a, T> TermDeepView<'a, T> {
 #[derive(Clone)]
 pub(crate) struct TermDeepViewArgs<'a, T> {
     buf: &'a [TermElem<T>],
-    links: &'a [usize],
+    term_assigns: &'a TermAssignments,
     /// Inclusive
     start: TermId,
     /// Exclusive
@@ -1078,7 +1165,7 @@ impl<'a, T> Iterator for TermDeepViewArgs<'a, T> {
             self.start += 1;
             Some(TermDeepView {
                 buf: self.buf,
-                links: self.links,
+                term_assigns: self.term_assigns,
                 id,
             })
         } else {
@@ -1106,6 +1193,13 @@ pub(crate) struct TermViewMut<'a, T> {
 }
 
 impl<'a, T> TermViewMut<'a, T> {
+    pub(crate) fn as_view(&self) -> TermView<'_, T> {
+        TermView {
+            buf: &self.arr.buf,
+            id: self.id,
+        }
+    }
+
     pub(crate) const fn id(&self) -> TermId {
         self.id
     }
@@ -1124,30 +1218,52 @@ impl<'a, T> TermViewMut<'a, T> {
         n
     }
 
-    pub(crate) fn with_terminal<F>(&mut self, f: &mut F)
+    pub(crate) fn with_terminal<F>(&mut self, mut f: F)
     where
         F: FnMut(&mut UniqueTermArray<T>, TermId),
     {
-        let arity = self.arity();
-        if arity == 0 {
-            f(self.arr, self.id);
-        } else {
-            let org = self.id.0;
+        fn helper<'a, T, F>(this: &mut TermViewMut<'a, T>, f: &mut F)
+        where
+            F: FnMut(&mut UniqueTermArray<T>, TermId),
+        {
+            let arity = this.arity();
+            if arity == 0 {
+                f(this.arr, this.id);
+            } else {
+                let org = this.id.0;
 
-            for i in 0..arity as usize {
-                let TermElem::Arg(arg_id) = self.arr.buf[org + 2 + i] else {
-                    unreachable!()
-                };
-                self.id = arg_id;
-                self.with_terminal(f);
+                for i in 0..arity as usize {
+                    let TermElem::Arg(arg_id) = this.arr.buf[org + 2 + i] else {
+                        unreachable!()
+                    };
+                    this.id = arg_id;
+                    helper(this, f);
+                }
+
+                this.id = TermId(org);
             }
-
-            self.id = TermId(org);
         }
+        helper(self, &mut f)
     }
 }
 
-impl<T: Clone + Eq + Hash> TermViewMut<'_, T> {
+impl<T: Atom> TermViewMut<'_, T> {
+    /// Applies the given function to all functors in this term, then returns true if any of
+    /// functors has been replaced.
+    ///
+    /// Original term never changes, instead this method makes a new term when required. If new term
+    /// has been generated, this view becomes to point the new term.
+    pub(crate) fn replace_with<F: FnMut(&T) -> Option<T>>(&mut self, mut map_func: F) -> bool {
+        let mut buf_off = self.arr.buf.len();
+        let mut early_exit = |_: TermId| None;
+        if let Some(new_id) = self.replace_inner(&mut buf_off, &mut map_func, &mut early_exit) {
+            self.id = new_id;
+            true
+        } else {
+            false
+        }
+    }
+
     /// If this term is `from` or contains `from`, then replaces them to `to` in a clone-on-write
     /// way.
     ///
@@ -1159,7 +1275,9 @@ impl<T: Clone + Eq + Hash> TermViewMut<'_, T> {
         }
 
         let mut buf_off = self.arr.buf.len();
-        if let Some(new_id) = self._replace(from, to, &mut buf_off) {
+        let mut map_func = |_: &T| None;
+        let mut early_exit = |id: TermId| (id == from).then_some(to);
+        if let Some(new_id) = self.replace_inner(&mut buf_off, &mut map_func, &mut early_exit) {
             self.id = new_id;
             true
         } else {
@@ -1167,9 +1285,24 @@ impl<T: Clone + Eq + Hash> TermViewMut<'_, T> {
         }
     }
 
-    fn _replace(&mut self, from: TermId, to: TermId, buf_off: &mut usize) -> Option<TermId> {
-        if self.id == from {
-            return Some(to);
+    /// Shared clone-on-write implementation used by [`Self::replace`] and [`Self::replace_with`].
+    ///
+    /// * `map_func` - Optionally replaces the functor of the current term.
+    /// * `early_exit` - Optionally replaces the current term by id, short-circuiting before any
+    ///   cloning.
+    fn replace_inner<MapFn, MapId>(
+        &mut self,
+        buf_off: &mut usize,
+        map_func: &mut MapFn,
+        early_exit: &mut MapId,
+    ) -> Option<TermId>
+    where
+        MapFn: FnMut(&T) -> Option<T>,
+        MapId: FnMut(TermId) -> Option<TermId>,
+    {
+        // Short-circuit: return a direct replacement for this term without cloning.
+        if let Some(id) = early_exit(self.id) {
+            return Some(id);
         }
 
         // Term id & term space for this view.
@@ -1177,15 +1310,14 @@ impl<T: Clone + Eq + Hash> TermViewMut<'_, T> {
         // Term id & term space for a new term.
         let new = *buf_off;
 
-        // Reserves buffer space for a new term corresponding this view.
-        let TermElem::Arity(arity) = self.arr.buf[cur + 1] else {
-            unreachable!()
-        };
-        *buf_off = new + 2 + arity as usize;
-        let org_buf_len = self.arr.buf.len();
-        if self.arr.buf.len() < *buf_off {
-            self.arr.buf.resize_with(*buf_off, || TermElem::dummy());
-        }
+        // Reserves buffer space for the size of this term if required.
+        let (arity, org_buf_len, new_end) = self.ensure_space(new);
+
+        // Moves the offset for nested inner terms.
+        *buf_off = new_end;
+
+        let new_functor = map_func(self.functor());
+        let is_func_replaced = new_functor.is_some();
 
         // Tries to replace the arguments.
         let mut is_arg_replaced = false;
@@ -1195,7 +1327,8 @@ impl<T: Clone + Eq + Hash> TermViewMut<'_, T> {
             };
 
             self.id = arg_id;
-            self.arr.buf[new + 2 + i] = if let Some(new_arg_id) = self._replace(from, to, buf_off) {
+            let new_arg_id = self.replace_inner(buf_off, map_func, early_exit);
+            self.arr.buf[new + 2 + i] = if let Some(new_arg_id) = new_arg_id {
                 is_arg_replaced = true;
                 TermElem::Arg(new_arg_id)
             } else {
@@ -1204,25 +1337,50 @@ impl<T: Clone + Eq + Hash> TermViewMut<'_, T> {
         }
         self.id = TermId(cur);
 
-        if is_arg_replaced {
-            // Sets the functor and arity at the new space.
-            let TermElem::Functor(functor) = &self.arr.buf[cur] else {
-                unreachable!()
+        if is_func_replaced || is_arg_replaced {
+            // Sets the functor/arity at the new space.
+            self.arr.buf[new] = match new_functor {
+                Some(f) => TermElem::Functor(f),
+                None => TermElem::Functor(self.functor().clone()),
             };
-            self.arr.buf[new] = TermElem::Functor(functor.clone());
             self.arr.buf[new + 1] = TermElem::Arity(arity);
-            let new_id = TermId(new);
 
-            // New mapping.
-            let hash = buf_term_hash(&self.arr.buf, new_id);
-            self.arr.add_mapping(hash, new_id);
-
-            Some(new_id)
+            // Dedup: Reuse an existing structually identical term if present, otherwise register
+            // the new one.
+            match self.arr.try_register_unique_term(TermId(new)) {
+                Ok(id) => Some(id),
+                Err(existing_id) => {
+                    self.arr.buf.truncate(org_buf_len); // Discards the buffer change
+                    Some(existing_id)
+                }
+            }
         } else {
-            // Discards the buffer change.
-            self.arr.buf.truncate(org_buf_len);
+            self.arr.buf.truncate(org_buf_len); // Discards the buffer change
             None
         }
+    }
+
+    /// Reserves term space as much as this term in the term array if required.
+    ///
+    /// Returns
+    /// - arity
+    /// - old term array length
+    /// - `off + 2 + arity`, which means the end index of the reserved term space.
+    fn ensure_space(&mut self, off: usize) -> (u32, usize, usize) {
+        let cur = self.id.0;
+        let TermElem::Arity(arity) = self.arr.buf[cur + 1] else {
+            unreachable!()
+        };
+
+        let term_space = 2 /* functor + arity itself */ + arity as usize;
+        let end = off + term_space;
+
+        let old_len = self.arr.buf.len();
+        if old_len < end {
+            self.arr.buf.resize_with(end, || TermElem::dummy());
+        }
+
+        (arity, old_len, end)
     }
 }
 
@@ -1282,6 +1440,40 @@ fn term_hash<T: Hash>(term: &Term<T>) -> u64 {
     }
 }
 
+/// Returns true if the two terms at `a` and `b` are structurally identical.
+fn structually_eq<T: PartialEq>(buf: &[TermElem<T>], a: TermId, b: TermId) -> bool {
+    if a == b {
+        return true;
+    }
+    let TermElem::Functor(fa) = &buf[a.0] else {
+        return false;
+    };
+    let TermElem::Functor(fb) = &buf[b.0] else {
+        return false;
+    };
+    if fa != fb {
+        return false;
+    }
+    let TermElem::Arity(na) = buf[a.0 + 1] else {
+        return false;
+    };
+    let TermElem::Arity(nb) = buf[b.0 + 1] else {
+        return false;
+    };
+    if na != nb {
+        return false;
+    }
+    (0..na as usize).all(|i| {
+        let TermElem::Arg(arg_a) = buf[a.0 + 2 + i] else {
+            return false;
+        };
+        let TermElem::Arg(arg_b) = buf[b.0 + 2 + i] else {
+            return false;
+        };
+        structually_eq(buf, arg_a, arg_b)
+    })
+}
+
 /// Generates the same hash value as what [`term_hash`] generates.
 fn buf_term_hash<T: Hash>(buf: &[TermElem<T>], id: TermId) -> u64 {
     // A hasher with fixed keys
@@ -1320,11 +1512,6 @@ mod tests {
     use any_intern::DroplessInterner;
 
     #[test]
-    fn test_expr_array() {
-        test_expr_array_replace_term();
-        test_expr_array_replace_expr();
-    }
-
     fn test_expr_array_replace_term() {
         let mut buf = TermStorage::new();
         let interner = DroplessInterner::default();
@@ -1378,6 +1565,7 @@ mod tests {
         assert_eq!(buf.exprs.buf, expected_buf);
     }
 
+    #[test]
     fn test_expr_array_replace_expr() {
         let mut buf = TermStorage::new();
         let interner = DroplessInterner::default();
@@ -1423,11 +1611,6 @@ mod tests {
     }
 
     #[test]
-    fn test_term_array() {
-        test_term_array_replace();
-        test_recursive_term();
-    }
-
     fn test_term_array_replace() {
         let mut arr = UniqueTermArray::new();
         let interner = DroplessInterner::default();
@@ -1484,6 +1667,65 @@ mod tests {
         assert_eq!(arr.buf, expected_buf);
     }
 
+    #[test]
+    #[rustfmt::skip]
+    fn test_term_array_replace_with() {
+        let mut arr = UniqueTermArray::new();
+        let interner = DroplessInterner::default();
+
+        let id_f = insert_term(&mut arr, &interner, "f($X, $Y, $X)");
+
+        let mut expected_buf: Vec<TermElem<Name<_>>> = vec![
+            /*  0 */ TermElem::Functor(Name::with_intern("f", &interner)),
+            /*  1 */ TermElem::Arity(3),
+            /*  2 */ TermElem::Arg(TermId(5)),
+            /*  3 */ TermElem::Arg(TermId(7)),
+            /*  4 */ TermElem::Arg(TermId(5)), // X appears twice, but stored once
+            /*  5 */ TermElem::Functor(Name::with_intern("$X", &interner)),
+            /*  6 */ TermElem::Arity(0),
+            /*  7 */ TermElem::Functor(Name::with_intern("$Y", &interner)),
+            /*  8 */ TermElem::Arity(0),
+        ];
+
+        assert_eq!(arr.buf, expected_buf);
+        assert_eq!(id_f, TermId(0));
+
+        // === Replace ===
+
+        let mut view = arr.get_mut(id_f);
+        let replaced = view.replace_with(|functor| {
+            let interned = match functor.as_ref() {
+                "$X" => interner.intern_formatted_str(&0, 1).unwrap(),
+                "$Y" => interner.intern_formatted_str(&1, 1).unwrap(),
+                _ => return None,
+            };
+            Some(Name::new(interned))
+        });
+        assert!(replaced);
+
+        let clone_on_replace: Vec<TermElem<Name<_>>> = vec![
+            /*  9 */ TermElem::Functor(Name::with_intern("f", &interner)),
+            /* 10 */ TermElem::Arity(3),
+            /* 11 */ TermElem::Arg(TermId(14)),
+            /* 12 */ TermElem::Arg(TermId(16)),
+            /* 13 */ TermElem::Arg(TermId(14)), // reuses first "0" instead of a duplicate
+            /* 14 */ TermElem::Functor(Name::with_intern("0", &interner)),
+            /* 15 */ TermElem::Arity(0),
+            /* 16 */ TermElem::Functor(Name::with_intern("1", &interner)),
+            /* 17 */ TermElem::Arity(0),
+        ];
+        expected_buf.extend(clone_on_replace);
+
+        // The view now points to the newly created f(0, 1, 0).
+        assert_eq!(view.id(), TermId(9));
+        assert_eq!(arr.buf, expected_buf);
+        // The original f(X, Y, X) at id=0 is untouched.
+        assert_eq!(arr.buf[0], TermElem::Functor(Name::with_intern("f", &interner)));
+        assert_eq!(arr.buf[2], TermElem::Arg(TermId(5)));
+        assert_eq!(arr.buf[4], TermElem::Arg(TermId(5))); // both X args still point to original X
+    }
+
+    #[test]
     fn test_recursive_term() {
         let mut arr = UniqueTermArray::new();
         let interner = DroplessInterner::default();

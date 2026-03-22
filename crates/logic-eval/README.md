@@ -11,30 +11,45 @@
 [codecov-badge]: https://codecov.io/gh/ecoricemon/logic-eval/graph/badge.svg?flag=logic-eval
 [codecov-url]: https://app.codecov.io/gh/ecoricemon/logic-eval?flags%5B0%5D=logic-eval
 
-A prolog-like logic evaluator.
+```text
++------------------+
+|  Feel(fresh) :-  |
+|   Sleep(well),   |
+|   Sun(shine),    |
+|   Air(cool).     |
++------------------+
+```
 
-## Example
+`logic-eval` is a Prolog-like logic evaluation library for Rust.
+
+## Features
+
+- `SLG resolution`: handles recursive queries with tabling.
+- `Custom type support`: use `&str`, interned strings, or your own `Atom` type.
+- `Parsing`: parse facts, rules, and queries from a Prolog-like text syntax with `parse_str`.
+- `Basic logical operators`: supports NOT, AND, and OR in rule bodies.
+
+## Examples
+
+### Parse text and query a database
 
 ```rust
 use logic_eval::{Database, StrInterner, parse_str};
 
-// Creates a DB.
 let mut db = Database::new();
 let interner = StrInterner::new();
 
-// Initializes the DB with a little bit of logic.
 let dataset = "
     child(a, b).
     child(b, c).
+    child(c, d).
     descend($X, $Y) :- child($X, $Y).
     descend($X, $Z) :- child($X, $Y), descend($Y, $Z).
 ";
 db.insert_dataset(parse_str(dataset, &interner).unwrap());
 db.commit();
 
-// Queries the DB.
-let query = "descend($X, $Y).";
-let mut cx = db.query(parse_str(query, &interner).unwrap());
+let mut cx = db.query(parse_str("descend($X, $Y).", &interner).unwrap());
 
 let mut answer = Vec::new();
 while let Some(eval) = cx.prove_next() {
@@ -45,6 +60,9 @@ while let Some(eval) = cx.prove_next() {
 assert_eq!(answer, [
     "$X = a, $Y = b",
     "$X = b, $Y = c",
+    "$X = c, $Y = d",
     "$X = a, $Y = c",
+    "$X = b, $Y = d",
+    "$X = a, $Y = d",
 ]);
 ```

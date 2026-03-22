@@ -1,5 +1,7 @@
-use super::text::Name;
-use crate::Atom;
+use crate::{
+    prove::{canonical as canon, prover::Integer},
+    Atom,
+};
 use std::{
     fmt::{self, Debug, Display, Write},
     ops,
@@ -58,6 +60,44 @@ impl<T> Clause<T> {
         self.head.replace_all(f);
         if let Some(body) = &mut self.body {
             body.replace_term(f);
+        }
+    }
+}
+
+impl Clause<Integer> {
+    /// Returns true if the clause needs SLG resolution (tabling).
+    ///
+    /// If a clause has left or mid recursion, it must be handled by tabling.
+    ///
+    /// # Examples
+    /// foo(X, Y) :- foo(A, B) ...     // left recursion
+    /// foo(X, Y) :- ... foo(A, B) ... // mid recursion
+    pub fn needs_tabling(&self) -> bool {
+        return if let Some(body) = &self.body {
+            let mut head = self.head.clone();
+            let mut body = body.clone();
+            canon::canonicalize_term(&mut head);
+            canon::canonicalize_expr_on_term(&mut body);
+            helper(&body.distribute_not(), &head)
+        } else {
+            false
+        };
+
+        // === Internal helper functions ===
+
+        fn helper(expr: &Expr<Integer>, head: &Term<Integer>) -> bool {
+            match expr {
+                Expr::Term(term) => term == head,
+                Expr::Not(arg) => helper(arg, head),
+                Expr::And(args) => {
+                    if let Some((last, first)) = args.split_last() {
+                        first.iter().any(|arg| helper(arg, head)) || helper(last, head)
+                    } else {
+                        false
+                    }
+                }
+                Expr::Or(args) => args.iter().any(|arg| helper(arg, head)),
+            }
         }
     }
 }
@@ -127,7 +167,7 @@ impl<T: Clone> Term<T> {
     }
 }
 
-impl<T: Atom> Term<Name<T>> {
+impl<T: Atom> Term<T> {
     pub fn is_variable(&self) -> bool {
         let is_variable = self.functor.is_variable();
 
@@ -145,6 +185,23 @@ impl<T: Atom> Term<Name<T>> {
         }
 
         self.args.iter().any(|arg| arg.contains_variable())
+    }
+
+    pub fn replace_variables<F: FnMut(&mut T)>(&mut self, mut f: F) {
+        fn helper<T, F>(term: &mut Term<T>, f: &mut F)
+        where
+            T: Atom,
+            F: FnMut(&mut T),
+        {
+            if term.is_variable() {
+                f(&mut term.functor);
+            } else {
+                for arg in &mut term.args {
+                    helper(arg, f);
+                }
+            }
+        }
+        helper(self, &mut f)
     }
 }
 
@@ -190,20 +247,20 @@ impl<T> Expr<T> {
         Self::Not(Box::new(expr))
     }
 
-    pub fn expr_and<I: IntoIterator<Item = Expr<T>>>(elems: I) -> Self {
-        Self::And(elems.into_iter().collect())
+    pub fn expr_and<I: IntoIterator<Item = Expr<T>>>(args: I) -> Self {
+        Self::And(args.into_iter().collect())
     }
 
-    pub fn expr_or<I: IntoIterator<Item = Expr<T>>>(elems: I) -> Self {
-        Self::Or(elems.into_iter().collect())
+    pub fn expr_or<I: IntoIterator<Item = Expr<T>>>(args: I) -> Self {
+        Self::Or(args.into_iter().collect())
     }
 
     pub fn map<U, F: FnMut(T) -> U>(self, f: &mut F) -> Expr<U> {
         match self {
-            Self::Term(v) => Expr::Term(v.map(f)),
-            Self::Not(v) => Expr::Not(Box::new(v.map(f))),
-            Self::And(v) => Expr::And(v.into_iter().map(|expr| expr.map(f)).collect()),
-            Self::Or(v) => Expr::Or(v.into_iter().map(|expr| expr.map(f)).collect()),
+            Self::Term(term) => Expr::Term(term.map(f)),
+            Self::Not(arg) => Expr::Not(Box::new(arg.map(f))),
+            Self::And(args) => Expr::And(args.into_iter().map(|arg| arg.map(f)).collect()),
+            Self::Or(args) => Expr::Or(args.into_iter().map(|arg| arg.map(f)).collect()),
         }
     }
 
@@ -225,18 +282,51 @@ impl<T> Expr<T> {
     }
 }
 
+impl<T: PartialEq> Expr<T> {
+    pub fn contains_term(&self, term: &Term<T>) -> bool {
+        match self {
+            Self::Term(t) => t == term,
+            Self::Not(arg) => arg.contains_term(term),
+            Self::And(args) | Self::Or(args) => args.iter().any(|arg| arg.contains_term(term)),
+        }
+    }
+
+    /// e.g. ¬(A ∧ (B ∨ C)) -> ¬A ∨ (¬B ∧ ¬C)
+    pub fn distribute_not(self) -> Self {
+        match self {
+            Self::Term(term) => Self::Term(term),
+            Self::Not(expr) => match *expr {
+                Self::Term(term) => Self::Not(Box::new(Self::Term(term))),
+                Self::Not(inner) => inner.distribute_not(),
+                Self::And(args) => Self::Or(
+                    args.into_iter()
+                        .map(|arg| Self::Not(Box::new(arg)).distribute_not())
+                        .collect(),
+                ),
+                Self::Or(args) => Self::And(
+                    args.into_iter()
+                        .map(|arg| Self::Not(Box::new(arg)).distribute_not())
+                        .collect(),
+                ),
+            },
+            Self::And(args) => Self::And(args.into_iter().map(Self::distribute_not).collect()),
+            Self::Or(args) => Self::Or(args.into_iter().map(Self::distribute_not).collect()),
+        }
+    }
+}
+
 impl<T: Display> Display for Expr<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Term(term) => term.fmt(f)?,
-            Self::Not(inner) => {
+            Self::Not(arg) => {
                 f.write_str("\\+ ")?;
-                if matches!(**inner, Self::And(_) | Self::Or(_)) {
+                if matches!(**arg, Self::And(_) | Self::Or(_)) {
                     f.write_char('(')?;
-                    inner.fmt(f)?;
+                    arg.fmt(f)?;
                     f.write_char(')')?;
                 } else {
-                    inner.fmt(f)?;
+                    arg.fmt(f)?;
                 }
             }
             Self::And(args) => {
@@ -266,8 +356,44 @@ impl<T: Display> Display for Expr<T> {
     }
 }
 
-#[derive(Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Predicate<T> {
     pub functor: T,
     pub arity: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Expr, Term};
+
+    #[test]
+    fn distribute_not_applies_de_morgan() {
+        let expr = Expr::expr_not(Expr::expr_and([
+            Expr::term_atom("a"),
+            Expr::expr_or([Expr::term_atom("b"), Expr::term_atom("c")]),
+        ]));
+
+        let expected = Expr::expr_or([
+            Expr::expr_not(Expr::term_atom("a")),
+            Expr::expr_and([
+                Expr::expr_not(Expr::term_atom("b")),
+                Expr::expr_not(Expr::term_atom("c")),
+            ]),
+        ]);
+
+        assert_eq!(expr.distribute_not(), expected);
+    }
+
+    #[test]
+    fn distribute_not_removes_double_negation() {
+        let expr = Expr::expr_not(Expr::expr_not(Expr::term(Term::compound(
+            "f",
+            [Term::atom("x")],
+        ))));
+
+        assert_eq!(
+            expr.distribute_not(),
+            Expr::term(Term::compound("f", [Term::atom("x")]))
+        );
+    }
 }
