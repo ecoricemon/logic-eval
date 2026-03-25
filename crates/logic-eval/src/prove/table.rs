@@ -57,8 +57,7 @@ impl IndexMut<TableIndex> for Table {
 pub(crate) struct TableEntry {
     /// Non-empty assignment record for variables in a node.
     ///
-    /// All [`SeenAssignments`] have the same length of answers. Use the same index to get a set of
-    /// answers.
+    /// All answer columns have the same length. Use the same row index to get one answer tuple.
     ///
     /// # Examples
     ///
@@ -68,15 +67,15 @@ pub(crate) struct TableEntry {
     /// Y = i or j or k
     seen: AnswerMatrix,
 
-    /// Consumers(nodes) will be notified when their entry has updated.
+    /// Consumer nodes notified when this entry gets a new answer.
     consumers: Vec<Consumer>,
 }
 
 impl TableEntry {
-    /// Making an entry can be rejected when
+    /// Returns `None` when:
     /// - `view` is just a variable, which doesn't make sense for tabling. f(X) should be given for
     ///   example.
-    /// - `view` doesn't contain any variables in it. It doesn't need the tabling.
+    /// - `view` doesn't contain any variables, so it does not need tabling.
     pub(crate) fn from_term_view(view: &TermView<'_, Integer>) -> Option<Self> {
         if view.is_variable() || !view.contains_variable() {
             return None;
@@ -131,9 +130,9 @@ impl TableEntry {
     }
 }
 
-/// A non-empty variable-answer relations.
+/// A non-empty variable-answer matrix.
 ///
-///  unique var  | answer1 | answer2 | assign3 |
+///  unique var  | answer1 | answer2 | answer3 |
 /// :----------: | :-----: | :-----: | :-----: |
 ///      X       |    a    |    x    |    i    |
 ///      Y       |    b    |    y    |    j    |
@@ -144,7 +143,7 @@ pub(crate) struct AnswerMatrix {
     /// Column-wise elements, e.g. X, Y, W, Z, a, b, c, d, ...
     elems: Vec<TermId>,
     rows: usize,
-    // For double check
+    // Includes the variable column.
     cols: usize,
 }
 
@@ -178,8 +177,7 @@ impl AnswerMatrix {
         }
     }
 
-    /// This method assumes that the `term_assigns` has concrete answers(atoms, not variables) for
-    /// variables of this entry.
+    /// This method assumes that `term_assigns` has ground answers for this entry's variables.
     fn update(&mut self, term_assigns: &TermAssignments) {
         self.elems.reserve_exact(self.rows);
         for r in 0..self.rows {

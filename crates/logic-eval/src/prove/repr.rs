@@ -276,7 +276,7 @@ impl<'a, T> ExprView<'a, T> {
     /// The given function `f` is applied on the top terms of the expression, but not applied on
     /// inner terms of the top terms.
     ///
-    /// Note that a term is a recursive type like expression.
+    /// Note that a term is also recursive.
     pub(crate) fn with_term<F: FnMut(TermView<'a, T>)>(&self, f: &mut F) {
         match self.as_kind() {
             ExprKind::Term(term) => f(term),
@@ -392,7 +392,7 @@ impl<'a, T> ExprViewMut<'a, T> {
         helper(self, &mut f)
     }
 
-    /// Finds the destination of jump (Elem::Expr) chain then moves this view to the final
+    /// Finds the destination of an [`ExprElem::Expr`] chain, then moves this view to the final
     /// expression.
     fn find_then_move(&mut self) {
         self.id = self.find(self.id);
@@ -419,7 +419,7 @@ pub(crate) enum ApplyResult {
 }
 
 impl<'a, T: Clone> ExprViewMut<'a, T> {
-    /// Sets the most left term to the given boolean value.
+    /// Sets the leftmost term to the given boolean value.
     ///
     /// This operation always clones the original expression then does the setting on that. Plus,
     /// this could unwrap AND or OR if they do not contain two or more arguments after evaluation.
@@ -502,7 +502,7 @@ impl<'a, T: Clone> ExprViewMut<'a, T> {
         }
     }
 
-    /// Replaces the most left expression(term) to the given `to` in a clone-on-write way.
+    /// Replaces the leftmost term with the given `to` in a clone-on-write way.
     ///
     /// If the replacement took place, then a new expression is created then this view becomes to
     /// point the new expression instead of modifying original expression directly.
@@ -657,11 +657,11 @@ impl<'a, T: Atom> ExprViewMut<'a, T> {
 pub(crate) enum ExprElem {
     Term(TermId),
     Not(ExprId),
-    /// Followed by `Expr`s.
+    /// Followed by [`ExprElem::Expr`] entries.
     And {
         len: usize,
     },
-    /// Followed by `Expr`s.
+    /// Followed by [`ExprElem::Expr`] entries.
     Or {
         len: usize,
     },
@@ -778,7 +778,7 @@ impl<T: Clone + Eq + Hash + PartialEq> UniqueTermArray<T> {
     }
 
     /// If there's no structurally identical term in the array, then returns Ok with the `new_id`.
-    /// Otherwise, returns Err with exisging id.
+    /// Otherwise, returns Err with the existing id.
     ///
     /// If result is Ok, then registers the `new_id` in the map.
     fn try_register_unique_term(&mut self, new_id: TermId) -> Result<TermId, TermId> {
@@ -830,7 +830,7 @@ impl<T: Clone + Eq + Hash + PartialEq> UniqueTermArray<T> {
 
         // === Internal helper functions ===
 
-        /// Checks whether arguments of the given term has been set or not by compairing with the
+        /// Checks whether arguments of the given term have been set or not by comparing with the
         /// predefined dummy value.
         fn is_arg_set<T: PartialEq>(buf: &[TermElem<T>], id: TermId) -> bool {
             let arity = UniqueTermArray::_get(buf, id).arity();
@@ -999,9 +999,9 @@ impl<T: Atom> TermView<'_, T> {
         is_var
     }
 
-    /// Returns true if this term is a variable or contains variable in it.
+    /// Returns true if this term is a variable or contains a variable in it.
     ///
-    /// e.g. Terms like `X` of `f(X)` will return true.
+    /// e.g. Terms like `X` or `f(X)` will return true.
     pub(crate) fn contains_variable(&self) -> bool {
         self.is_variable() || self.args().any(|arg| arg.contains_variable())
     }
@@ -1248,11 +1248,11 @@ impl<'a, T> TermViewMut<'a, T> {
 }
 
 impl<T: Atom> TermViewMut<'_, T> {
-    /// Applies the given function to all functors in this term, then returns true if any of
-    /// functors has been replaced.
+    /// Applies the given function to all functors in this term, then returns true if any functor
+    /// has been replaced.
     ///
-    /// Original term never changes, instead this method makes a new term when required. If new term
-    /// has been generated, this view becomes to point the new term.
+    /// The original term never changes. Instead this method makes a new term when required. If a
+    /// new term is generated, this view becomes to point to it.
     pub(crate) fn replace_with<F: FnMut(&T) -> Option<T>>(&mut self, mut map_func: F) -> bool {
         let mut buf_off = self.arr.buf.len();
         let mut early_exit = |_: TermId| None;
@@ -1345,7 +1345,7 @@ impl<T: Atom> TermViewMut<'_, T> {
             };
             self.arr.buf[new + 1] = TermElem::Arity(arity);
 
-            // Dedup: Reuse an existing structually identical term if present, otherwise register
+            // Dedup: Reuse an existing structurally identical term if present, otherwise register
             // the new one.
             match self.arr.try_register_unique_term(TermId(new)) {
                 Ok(id) => Some(id),
@@ -1360,7 +1360,7 @@ impl<T: Atom> TermViewMut<'_, T> {
         }
     }
 
-    /// Reserves term space as much as this term in the term array if required.
+    /// Reserves enough term space for this term in the term array if required.
     ///
     /// Returns
     /// - arity
@@ -1388,7 +1388,7 @@ impl<T: Atom> TermViewMut<'_, T> {
 ///
 /// Allowed sequences are as follows.
 /// * Functor, Arity(0)
-/// * Functor, Arity(n), Arg, ..
+/// * Functor, Arity(n), Arg, ...
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TermElem<T> {
     Functor(T),

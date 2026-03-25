@@ -19,10 +19,10 @@ use core::{
 };
 
 pub struct Database<T> {
-    /// Clause id dataset.
+    /// Clauses grouped by predicate.
     clauses: IndexMap<Predicate<Integer>, Vec<ClauseId>>,
 
-    /// Clauses that should be handled by tabling.
+    /// Predicates that should be handled by tabling.
     table_clauses: IndexSet<Predicate<Integer>>,
 
     /// We do not allow duplicate clauses in the dataset.
@@ -371,7 +371,7 @@ struct DatabaseState {
 struct DuplicateClauseChecker {
     seen: IndexSet<Clause<Integer>>,
 
-    /// Temporary buffer for granting [`Integer`] to variables.
+    /// Temporary buffer for assigning canonical [`Integer`]s to variables.
     vars: Vec<Integer>,
 }
 
@@ -404,7 +404,7 @@ impl DuplicateClauseChecker {
     }
 }
 
-/// Turns variables into `_$0`, `_$1`, and so on using the given canonical_var function.
+/// Rewrites variables using the values produced by `canonical_var`.
 ///
 /// Returns `None` if `canonical_var` is `None` (i.e. deduplication disabled).
 fn _convert_var_into_num<T: Atom>(

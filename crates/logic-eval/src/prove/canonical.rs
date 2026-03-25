@@ -15,7 +15,7 @@ pub(crate) fn canonicalize_term_id(stor: &mut TermStorage<Integer>, id: TermId) 
     CanonicalTermId(view.id())
 }
 
-/// e.g. f(X, Y, X) -> f(0, 1, 0)
+/// e.g. f($X, $Y, $X) -> f($0, $1, $0)
 pub(crate) fn canonicalize_term(term: &mut Term<Integer>) {
     let mut c = canonicalizer();
     term.replace_variables(|functor| *functor = c(*functor));
@@ -23,7 +23,7 @@ pub(crate) fn canonicalize_term(term: &mut Term<Integer>) {
 
 /// Applies [`canonicalize_term`] on each term without crossing term boundaries.
 ///
-/// e.g. f(X), g(Y, X) -> f(0), g(0, 1) (not f(0), g(1, 0))
+/// e.g. f($X), g($Y, $X) -> f($0), g($0, $1) (not f($0), g($1, $0))
 pub(crate) fn canonicalize_expr_on_term(expr: &mut Expr<Integer>) {
     match expr {
         Expr::Term(term) => canonicalize_term(term),
