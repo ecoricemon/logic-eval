@@ -381,15 +381,13 @@ impl DuplicateClauseChecker {
         let canonical_clause = clause.map(&mut |t| {
             if !t.is_variable() {
                 t
+            } else if let Some(found) = self.vars.iter().find(|&&var| var == t) {
+                *found
             } else {
-                if let Some(found) = self.vars.iter().find(|&&var| var == t) {
-                    *found
-                } else {
-                    let next_int = self.vars.len() as u32;
-                    let int = Integer::variable(next_int);
-                    self.vars.push(int);
-                    int
-                }
+                let next_int = self.vars.len() as u32;
+                let int = Integer::variable(next_int);
+                self.vars.push(int);
+                int
             }
         });
         let is_new = self.seen.insert(canonical_clause);
