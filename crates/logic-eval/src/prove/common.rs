@@ -1,7 +1,9 @@
 use crate::{Name, VAR_PREFIX};
 use core::hash::Hash;
 
+/// Atom type used in parsed and proved terms.
 pub trait Atom: Clone + Eq + Hash {
+    /// Returns `true` when this atom represents a variable.
     fn is_variable(&self) -> bool;
 }
 

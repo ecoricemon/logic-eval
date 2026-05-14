@@ -1,5 +1,6 @@
 use crate::{Error, Intern, Result};
 
+/// Parses `text` as `T` using the provided interner.
 pub fn parse_str<'int, Int, T>(text: &str, interner: &'int Int) -> Result<T>
 where
     Int: Intern,
@@ -9,10 +10,13 @@ where
     T::parse(&mut buf, interner)
 }
 
+/// A parser for values that may borrow interned strings.
 pub trait Parse<'int, Int: Intern>: Sized + 'int {
+    /// Parses a value from `buf` using `interner`.
     fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self>;
 }
 
+/// A cursor over a bounded slice of parser input.
 #[derive(Clone, Copy)]
 pub struct ParseBuffer<'a> {
     pub(crate) text: &'a str,
@@ -23,6 +27,7 @@ pub struct ParseBuffer<'a> {
 }
 
 impl<'a> ParseBuffer<'a> {
+    /// Creates a buffer that spans the whole input string.
     pub const fn new(text: &'a str) -> Self {
         Self {
             text,
@@ -134,6 +139,7 @@ macro_rules! impl_parse_for_string {
     };
 }
 
+/// Prefix used to mark variables in parsed terms.
 pub const VAR_PREFIX: char = '$';
 
 pub(crate) const RESERVED: &[char] = &[

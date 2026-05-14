@@ -61,21 +61,21 @@ pub(crate) struct TableEntry {
     ///
     /// # Examples
     ///
-    /// If we have 3 answers like below, the answers for (X, Y) are only (a, i), (b, j) or (c, k).
+    /// If we have 3 answers as below, the answers for (X, Y) are only (a, i), (b, j), or (c, k).
     /// Other combinations are invalid.
     /// X = a or b or c
     /// Y = i or j or k
     seen: AnswerMatrix,
 
-    /// Consumer nodes notified when this entry gets a new answer.
+    /// Consumer nodes to notify when this entry gets a new answer.
     consumers: Vec<Consumer>,
 }
 
 impl TableEntry {
     /// Returns `None` when:
-    /// - `view` is just a variable, which doesn't make sense for tabling. f(X) should be given for
-    ///   example.
-    /// - `view` doesn't contain any variables, so it does not need tabling.
+    /// - `view` is just a variable, which does not make sense for tabling. Use a term such as
+    ///   `f(X)` instead.
+    /// - `view` does not contain any variables, so it does not need tabling.
     pub(crate) fn from_term_view(view: &TermView<'_, Integer>) -> Option<Self> {
         if view.is_variable() || !view.contains_variable() {
             return None;
@@ -113,7 +113,7 @@ impl TableEntry {
         self.seen.column(0)
     }
 
-    /// An empty slice is returned when the `answer_index` is out of bounds.
+    /// Returns an empty slice when `answer_index` is out of bounds.
     pub(crate) fn answers(&self, answer_index: usize) -> &[TermId] {
         let col = answer_index + 1;
         self.seen.column(col)
@@ -165,7 +165,7 @@ impl AnswerMatrix {
         }
     }
 
-    /// An empty slice is returned when the `col` is out of bounds.
+    /// Returns an empty slice when `col` is out of bounds.
     fn column(&self, col: usize) -> &[TermId] {
         let start = col * self.rows;
         let end = start + self.rows;

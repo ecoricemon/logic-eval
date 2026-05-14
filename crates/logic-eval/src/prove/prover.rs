@@ -33,9 +33,9 @@ pub(crate) struct Prover {
     /// A given query.
     query: ExprId,
 
-    /// Variables in the root node(query).
+    /// Variables in the root node query.
     ///
-    /// This could be used to find what terms these variables are assigned to.
+    /// Used to find which terms these variables are assigned to.
     query_vars: Vec<TermId>,
 
     /// Previously returned ground query answers.
@@ -44,13 +44,13 @@ pub(crate) struct Prover {
     /// Task queue containing node index.
     queue: NodeQueue,
 
-    /// A buffer containing mapping between variables and temporary variables.
+    /// A buffer mapping variables to temporary variables.
     ///
-    /// This buffer is used when we convert variables into temporary variables for a clause. After
-    /// the conversion, this buffer gets empty.
+    /// This buffer is used when we convert variables into temporary variables for a clause. It is
+    /// empty after each conversion.
     temp_var_buf: Map<TermId, TermId>,
 
-    /// A monotonically increasing integer that is used for generating temporary variables.
+    /// A monotonically increasing integer used to generate temporary variables.
     temp_var_int: u32,
 
     /// SLG resolution.
@@ -121,11 +121,10 @@ impl Prover {
     }
 
     /// Evaluates the given node against matching clauses or table answers, then returns whether a
-    /// proof search path is complete or not.
+    /// proof-search path is complete.
     ///
-    /// If it reached an end of paths, it returns proof search result within `Some`. The proof
-    /// search result is either true or false, which means the expression in the given node is
-    /// evaluated as true or false.
+    /// If it reaches the end of a path, it returns the proof-search result in `Some`. The result is
+    /// true or false, matching the evaluated value of the expression in the given node.
     fn evaluate_node(
         &mut self,
         node_index: usize,
@@ -160,7 +159,7 @@ impl Prover {
             if let Some((_, entry)) = self.table.get_mut(&key) {
                 entry.register_consumer(node_index);
 
-                // No answers yet? the node may be woken up by notification.
+                // No answers yet? The node may be woken up by notification.
                 let answer_offset = self.nodes[node_index].table_answer_offset;
                 let answers = entry.answers(answer_offset);
                 if answers.is_empty() {
@@ -169,7 +168,7 @@ impl Prover {
                 let next_offset = answer_offset + 1;
                 self.nodes[node_index].table_answer_offset = next_offset;
 
-                // Synthesizes an answer clause, then unifies it with the current node.
+                // Synthesize an answer clause, then unify it with the current node.
                 let mut term = stor.get_term_mut(node_leftmost);
                 let vars = term.as_view().collect_variables();
                 for (var, answer) in vars.into_iter().zip(answers) {
@@ -186,7 +185,7 @@ impl Prover {
                     self.queue.push(node_index);
                 }
             } else {
-                // First encounter: Just creates a table entry then proceeds with SLD.
+                // First encounter: create a table entry, then proceed with SLD.
                 if let Some(entry) = TableEntry::from_term_view(&stor.get_term(node_leftmost)) {
                     let index = self.table.register(key, entry);
                     self.nodes[node_index].table_owner = Some(index);
@@ -363,13 +362,11 @@ impl Prover {
 
     /// Replaces variables in a clause with other temporary variables.
     //
-    // Why we replace variables with temporary variables in clauses before unifying?
-    // 1. That's because variables in different clauses are actually different from each other even
-    //    they have the same identity. Variable's identity is valid only in the one clause where
-    //    they belong.
-    // 2. Also, we apply this method whenever unification happens because one clause can be used
-    //    mupltiple times in a single proof search path. Then it is considered as a different
-    //    clause.
+    // Why replace variables with temporary variables in clauses before unifying?
+    // 1. Variables in different clauses are distinct from each other, even when they have the same
+    //    identity. A variable identity is valid only within the clause it belongs to.
+    // 2. We apply this method whenever unification happens because one clause can be used multiple
+    //    times in a single proof-search path. Each use is considered a distinct clause.
     fn convert_var_into_temp(
         mut clause_id: ClauseId,
         stor: &mut TermStorage<Integer>,
@@ -457,8 +454,8 @@ impl Prover {
         Some(node)
     }
 
-    /// Finds all from/to relations while traversing from the given node to the root node, then adds
-    /// the relations to [`TermAssignments`].
+    /// Finds all from/to relations while traversing from the given node to the root, then adds the
+    /// relations to [`TermAssignments`].
     fn find_assignments(&mut self, node_index: usize) {
         self.term_assigns.clear();
 
@@ -489,7 +486,7 @@ impl Prover {
             answer.push(resolved);
         }
 
-        // no query vars -> empty iter -> all() returns true
+        // No query vars -> empty iter -> all() returns true.
         if self.query_answers.iter().all(|seen| seen != &answer) {
             self.query_answers.push(answer);
             true
@@ -542,9 +539,8 @@ impl Prover {
 
 /// Manages batched unification updates between the current goal and a clause.
 ///
-/// You can make unification operations, [`UnifyOp`]s, by unifying the leftmost term of the goal and
-/// the head of the clause. Append the operations in order to apply them to the whole goal and
-/// clause. You can apply them at once via [`consume_ops`].
+/// Unifying the leftmost term of the goal with the clause head produces [`UnifyOp`]s. Append the
+/// operations in order, then apply them to the whole goal and clause at once with [`consume_ops`].
 ///
 /// [`consume_ops`]: Self::consume_ops
 #[derive(Debug)]
@@ -554,8 +550,8 @@ struct UnificationOperator {
 
     /// Unification history.
     ///
-    /// This is a record of `(from, to)` pairs. It means there has been unification that substituted
-    /// the `from` with `to`. For example, `(X, a)` means the variable `X` was substituted with `a`.
+    /// This is a record of `(from, to)` pairs. Each pair means unification substituted `from` with
+    /// `to`. For example, `(X, a)` means the variable `X` was substituted with `a`.
     record: Vec<(TermId, TermId)>,
 }
 
@@ -577,10 +573,10 @@ impl UnificationOperator {
     }
 
     /// Returns
-    /// * `ExprId` - Operation applied `left`
-    /// * `ClauseId` - Operation applied to `right`
-    /// * `Range<usize>` - A range of unification history(from/to pairs). You can retrieve the
-    ///   from/to pairs via [`get_record`]
+    /// * `ExprId` - `left` after applying the operations
+    /// * `ClauseId` - `right` after applying the operations
+    /// * `Range<usize>` - A range of unification history (from/to pairs). You can retrieve the
+    ///   from/to pairs via [`get_record`].
     ///
     /// [`get_record`]: Self::get_record
     #[must_use]
@@ -651,8 +647,8 @@ struct Node {
     kind: NodeKind,
     parent: usize,
 
-    /// A range of unification history that applied to prove this node:
-    /// Pairs of from([`TermId`]) -> to([`TermId`]).
+    /// A range of unification history applied to prove this node:
+    /// pairs of from ([`TermId`]) -> to ([`TermId`]).
     ///
     /// You can retrieve the from/to pairs via [`UnificationOperator::get_record`].
     uni_history: Range<usize>,
@@ -683,7 +679,7 @@ impl Node {
 
 #[derive(Debug, Clone, Copy)]
 enum NodeKind {
-    /// A non-terminal node containing an expression id that needs to be evaluated.
+    /// A non-terminal node containing an expression ID that needs to be evaluated.
     Expr(ExprId),
 
     /// A terminal node containing whether a proof path ends with true or false.
@@ -692,7 +688,7 @@ enum NodeKind {
 
 #[derive(Debug, Default)]
 pub(crate) struct TermAssignments {
-    /// Union-find from-to relations.
+    /// Union-find from/to relations.
     ///
     /// # Examples
     /// `roots[a]: a` means TermId(a) is not unified with anything.
@@ -755,6 +751,7 @@ enum UnifyOp {
     Right { from: TermId, to: TermId },
 }
 
+/// Proof-search context for a query.
 pub struct ProveCx<'a, T: Atom> {
     prover: &'a mut Prover,
     clauses: &'a IndexMap<Predicate<Integer>, Vec<ClauseId>>,
@@ -766,13 +763,14 @@ pub struct ProveCx<'a, T: Atom> {
 }
 
 impl<'a, T: Atom> ProveCx<'a, T> {
+    /// Returns the next proof result, if one is available.
     pub fn prove_next(&mut self) -> Option<EvalView<'_, T>> {
         while let Some(node_index) = self.prover.queue.pop() {
             if let Some(proof_result) =
                 self.prover
                     .evaluate_node(node_index, self.clauses, self.table_clauses, self.stor)
             {
-                // Returns Some(EvalView) only if the result is TRUE and yielded a new ground
+                // Return Some(EvalView) only if the result is TRUE and yielded a new ground
                 // query answer.
                 if proof_result && self.prover.record_query_answer(self.stor) {
                     return Some(EvalView {
@@ -789,6 +787,7 @@ impl<'a, T: Atom> ProveCx<'a, T> {
         None
     }
 
+    /// Returns `true` if the query has at least one proof.
     pub fn is_true(mut self) -> bool {
         self.prove_next().is_some()
     }
@@ -801,6 +800,7 @@ impl<T: Atom> Drop for ProveCx<'_, T> {
     }
 }
 
+/// View over the assignments produced by one proof result.
 pub struct EvalView<'a, T> {
     query_vars: &'a [TermId],
     terms: &'a [TermElem<Integer>],
@@ -851,6 +851,7 @@ impl<T> ExactSizeIterator for EvalView<'_, T> {
 
 impl<T> iter::FusedIterator for EvalView<'_, T> {}
 
+/// A single variable assignment from a proof result.
 pub struct Assignment<'a, T> {
     buf: &'a [TermElem<Integer>],
     from: TermId,
@@ -859,9 +860,9 @@ pub struct Assignment<'a, T> {
 }
 
 impl<'a, T: 'a> Assignment<'a, T> {
-    /// Returns left hand side variable name of the assignment.
+    /// Returns the left-hand-side variable name of the assignment.
     ///
-    /// Note that assignment's left hand side is always variable.
+    /// Note that the assignment's left-hand side is always a variable.
     pub fn get_lhs_variable(&self) -> &T {
         let int = self.lhs_view().find_variable().unwrap();
         self.nimap.get_name(&int).unwrap()
@@ -884,16 +885,16 @@ impl<'a, T: 'a> Assignment<'a, T> {
 }
 
 impl<'a, T: Atom + 'a> Assignment<'a, T> {
-    /// Creates left hand side term of the assignment.
+    /// Creates the left-hand-side term of the assignment.
     ///
-    /// To create a term, this method could allocate memory for the term.
+    /// Creating a term may allocate memory.
     pub fn lhs(&self) -> Term<T> {
         Self::term_view_to_term(self.lhs_view(), self.nimap)
     }
 
-    /// Creates right hand side term of the assignment.
+    /// Creates the right-hand-side term of the assignment.
     ///
-    /// To create a term, this method could allocate memory for the term.
+    /// Creating a term may allocate memory.
     pub fn rhs(&self) -> Term<T> {
         Self::term_deep_view_to_term(self.rhs_view(), self.nimap)
     }
@@ -1034,6 +1035,7 @@ impl TermViewMut<'_, Integer> {
     }
 }
 
+/// Internal integer representation of an atom.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Integer(u32);
 

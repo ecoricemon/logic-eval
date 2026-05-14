@@ -18,6 +18,7 @@ use core::{
     iter::FusedIterator,
 };
 
+/// A clause database that can answer logic queries.
 pub struct Database<T> {
     /// Clauses grouped by predicate.
     clauses: IndexMap<Predicate<Integer>, Vec<ClauseId>>,
@@ -34,19 +35,20 @@ pub struct Database<T> {
     /// Proof search engine.
     prover: Prover,
 
-    /// Mappings between T and Integer.
+    /// Mappings between `T` and [`Integer`].
     ///
-    /// Integer is internally used for fast comparison, but we need to get it back to T for the
-    /// clients.
+    /// [`Integer`] is used internally for fast comparison, but clients need values mapped back to
+    /// `T`.
     nimap: NameIntMap<T>,
 
-    /// States of DB's fields.
+    /// States of the database fields.
     ///
-    /// This is used when we discard some changes on the DB.
+    /// Used when discarding uncommitted database changes.
     revert_point: Option<DatabaseState>,
 }
 
 impl<T: Atom> Database<T> {
+    /// Creates an empty database.
     pub fn new() -> Self {
         Self {
             clauses: IndexMap::default(),
@@ -59,6 +61,7 @@ impl<T: Atom> Database<T> {
         }
     }
 
+    /// Iterates over all terms stored in the database.
     pub fn terms(&self) -> NamedTermViewIter<'_, T> {
         NamedTermViewIter {
             term_iter: self.stor.terms.terms(),
@@ -66,6 +69,7 @@ impl<T: Atom> Database<T> {
         }
     }
 
+    /// Iterates over all clauses stored in the database.
     pub fn clauses(&self) -> ClauseIter<'_, T> {
         ClauseIter {
             clauses: &self.clauses,
@@ -76,13 +80,14 @@ impl<T: Atom> Database<T> {
         }
     }
 
+    /// Inserts every clause from `dataset`.
     pub fn insert_dataset(&mut self, dataset: ClauseDataset<T>) {
         for clause in dataset {
             self.insert_clause(clause);
         }
     }
 
-    /// Inserts the given clause to the DB.
+    /// Inserts the given clause into the database.
     pub fn insert_clause(&mut self, clause: Clause<T>) {
         // Saves current state. We will revert DB when the change is not committed.
         if self.revert_point.is_none() {
@@ -117,6 +122,7 @@ impl<T: Atom> Database<T> {
             .or_insert(vec![value]);
     }
 
+    /// Starts a query against the committed database.
     pub fn query(&mut self, expr: Expr<T>) -> ProveCx<'_, T> {
         // Discards uncommitted changes.
         if let Some(revert_point) = self.revert_point.take() {
@@ -132,6 +138,7 @@ impl<T: Atom> Database<T> {
         )
     }
 
+    /// Commits pending clause insertions.
     pub fn commit(&mut self) {
         self.revert_point.take();
     }
@@ -376,7 +383,7 @@ struct DuplicateClauseChecker {
 }
 
 impl DuplicateClauseChecker {
-    /// Returns true if the given clause is new, has not been seen before.
+    /// Returns `true` if the given clause is new and has not been seen before.
     fn insert(&mut self, clause: Clause<Integer>) -> bool {
         let canonical_clause = clause.map(&mut |t| {
             if !t.is_variable() {
@@ -463,6 +470,7 @@ fn _convert_var_into_num<T: Atom>(
     }
 }
 
+/// Iterator over clauses in a [`Database`].
 #[derive(Clone)]
 pub struct ClauseIter<'a, T> {
     clauses: &'a IndexMap<Predicate<Integer>, Vec<ClauseId>>,
@@ -498,6 +506,7 @@ impl<'a, T> Iterator for ClauseIter<'a, T> {
 
 impl<T> FusedIterator for ClauseIter<'_, T> {}
 
+/// Borrowed view of a clause stored in a [`Database`].
 pub struct ClauseRef<'a, T> {
     id: ClauseId,
     stor: &'a TermStorage<Integer>,
@@ -505,11 +514,13 @@ pub struct ClauseRef<'a, T> {
 }
 
 impl<'a, T: Atom> ClauseRef<'a, T> {
+    /// Returns the clause head.
     pub fn head(&self) -> NamedTermView<'a, T> {
         let head = self.stor.get_term(self.id.head);
         NamedTermView::new(head, self.nimap)
     }
 
+    /// Returns the clause body, if this clause is a rule.
     pub fn body(&self) -> Option<NamedExprView<'a, T>> {
         self.id.body.map(|id| {
             let body = self.stor.get_expr(id);

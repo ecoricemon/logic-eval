@@ -8,6 +8,7 @@ use std::{
     slice,
 };
 
+/// Arena for values of one concrete type.
 pub struct TypedArena<T> {
     bump: Bump,
     len: Cell<usize>,
@@ -15,20 +16,23 @@ pub struct TypedArena<T> {
 }
 
 impl<T> TypedArena<T> {
-    /// Returns number of elements in this arena.
+    /// Returns the number of elements in this arena.
     pub fn len(&self) -> usize {
         self.len.get()
     }
 
+    /// Returns `true` if this arena is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Allocates `value` in the arena.
     pub fn alloc(&self, value: T) -> &mut T {
         self.len.set(self.len() + 1);
         self.bump.alloc(value)
     }
 
+    /// Drops all stored values and clears the arena.
     pub fn clear(&mut self) {
         self.drop_all();
         self.bump.reset();

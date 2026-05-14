@@ -1,13 +1,17 @@
 use crate::Atom;
 use core::fmt::{self, Display};
 
+/// Interns parser strings and returns atom-compatible references.
 pub trait Intern {
+    /// The interned string reference type produced by this interner.
     type Interned<'a>: Atom
     where
         Self: 'a;
 
+    /// Interns a string slice.
     fn intern_str(&self, s: &str) -> Self::Interned<'_>;
 
+    /// Formats a value into an interned string using at most `upper_size` bytes.
     fn intern_formatted_str<T: Display + ?Sized>(
         &self,
         value: &T,
@@ -53,5 +57,7 @@ impl Intern for any_intern::Interner {
     }
 }
 
+/// Default string interner for parsed text.
 pub type StrInterner = any_intern::DroplessInterner;
+/// Interned string type produced by [`StrInterner`].
 pub type InternedStr<'int> = any_intern::Interned<'int, str>;
