@@ -985,7 +985,7 @@ impl<T: Clone> TermView<'_, T> {
 }
 
 impl<T: Atom> TermView<'_, T> {
-    /// Returns true if this term is a variable.
+    /// Returns `true` if this term is a variable.
     ///
     /// e.g. Terms like `X`, `Y` will return true.
     pub(crate) fn is_variable(&self) -> bool {
@@ -999,7 +999,7 @@ impl<T: Atom> TermView<'_, T> {
         is_var
     }
 
-    /// Returns true if this term is a variable or contains a variable in it.
+    /// Returns `true` if this term is a variable or contains a variable.
     ///
     /// e.g. Terms like `X` or `f(X)` will return true.
     pub(crate) fn contains_variable(&self) -> bool {
@@ -1440,7 +1440,7 @@ fn term_hash<T: Hash>(term: &Term<T>) -> u64 {
     }
 }
 
-/// Returns true if the two terms at `a` and `b` are structurally identical.
+/// Returns `true` if the two terms at `a` and `b` are structurally identical.
 fn structually_eq<T: PartialEq>(buf: &[TermElem<T>], a: TermId, b: TermId) -> bool {
     if a == b {
         return true;

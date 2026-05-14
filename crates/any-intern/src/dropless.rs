@@ -223,24 +223,26 @@ pub struct DroplessInterner<S = fxhash::FxBuildHasher> {
 }
 
 impl DroplessInterner {
+    /// Creates an empty dropless interner.
     pub fn new() -> Self {
         Self::default()
     }
 }
 
 impl<S: BuildHasher> DroplessInterner<S> {
+    /// Creates an empty dropless interner with a custom hasher.
     pub fn with_hasher(hash_builder: S) -> Self {
-        // Safety: Only one instance
+        // Safety: Only one instance exists.
         let inner = unsafe { UnsafeLock::new(DroplessInternSet::with_hasher(hash_builder)) };
         Self { inner }
     }
 
-    /// Returns number of values the interner contains.
+    /// Returns the number of values the interner contains.
     pub fn len(&self) -> usize {
         self.with_inner(|set| set.len())
     }
 
-    /// Returns true if the interner is empty.
+    /// Returns `true` if the interner is empty.
     pub fn is_empty(&self) -> bool {
         self.with_inner(|set| set.is_empty())
     }
@@ -281,16 +283,15 @@ impl<S: BuildHasher> DroplessInterner<S> {
     /// Stores a value in the interner as a formatted string through [`Display`], returning a
     /// reference to the interned value.
     ///
-    /// This method provides a buffer for making string. This will be benefit in terms of
-    /// performance when you frequently make `String` via something like `to_string()` by exploiting
-    /// chunk memory.
+    /// This method provides a buffer for building strings. This can improve performance when you
+    /// frequently create `String`s with something like `to_string()` by reusing chunk memory.
     ///
     /// This method first formats the given value using the `Display` trait and stores the resulting
     /// string in the interner's buffer, then compares the string with existing values. If the
-    /// formatted string already exists in the interner, formatted string is discarded and reference
-    /// to the existing value is returned.
+    /// formatted string already exists in the interner, the formatted string is discarded and a
+    /// reference to the existing value is returned.
     ///
-    /// If you give insufficient `upper_size`, then error is returned.
+    /// Returns an error if `upper_size` is too small.
     ///
     /// # Examples
     ///
@@ -317,7 +318,7 @@ impl<S: BuildHasher> DroplessInterner<S> {
     /// This method checks if a value corresponding to the given key exists in the interner. If it
     /// exists, a reference to the interned value is returned. Otherwise, `None` is returned.
     ///
-    /// # Eaxmples
+    /// # Examples
     ///
     /// ```
     /// use any_intern::DroplessInterner;
@@ -336,8 +337,8 @@ impl<S: BuildHasher> DroplessInterner<S> {
 
     /// Removes all items in the interner.
     ///
-    /// Although the interner support interior mutability, clear method requires mutable access
-    /// to the interner to invalidate all [`Interned`]s referencing the interner.
+    /// Although the interner supports interior mutability, `clear` requires mutable access to
+    /// invalidate all [`Interned`] values referencing the interner.
     pub fn clear(&mut self) {
         self.with_inner(|set| set.clear())
     }
@@ -347,7 +348,7 @@ impl<S: BuildHasher> DroplessInterner<S> {
         F: FnOnce(&'this mut DroplessInternSet<S>) -> R,
         R: 'this,
     {
-        // Safety: Mutex unlocking is paired with the locking.
+        // Safety: Unlocking is paired with locking.
         unsafe {
             let set = self.inner.lock().as_mut();
             let ret = f(set);
@@ -359,7 +360,7 @@ impl<S: BuildHasher> DroplessInterner<S> {
 
 impl<S: Default> Default for DroplessInterner<S> {
     fn default() -> Self {
-        // Safety: Only one instance
+        // Safety: Only one instance exists.
         let inner = unsafe { UnsafeLock::new(DroplessInternSet::default()) };
         Self { inner }
     }
@@ -367,7 +368,7 @@ impl<S: Default> Default for DroplessInterner<S> {
 
 /// A dropless interner.
 ///
-/// Interning on this type always copies the given value into internal buffer.
+/// Interning on this type always copies the given value into an internal buffer.
 #[derive(Debug, Default)]
 pub struct DroplessInternSet<S = fxhash::FxBuildHasher> {
     bump: Bump,
@@ -377,12 +378,14 @@ pub struct DroplessInternSet<S = fxhash::FxBuildHasher> {
 }
 
 impl DroplessInternSet {
+    /// Creates an empty dropless intern set.
     pub fn new() -> Self {
         Self::default()
     }
 }
 
 impl<S: BuildHasher> DroplessInternSet<S> {
+    /// Creates an empty dropless intern set with a custom hasher.
     pub fn with_hasher(hash_builder: S) -> Self {
         Self {
             bump: Bump::new(),
@@ -392,16 +395,17 @@ impl<S: BuildHasher> DroplessInternSet<S> {
         }
     }
 
+    /// Stores a dropless value, returning a reference to the interned value.
     pub fn intern<K: Dropless + ?Sized>(&mut self, value: &K) -> Interned<'_, K> {
         let src = value.as_byte_ptr();
         let layout = value.layout();
 
         unsafe {
-            // Allocation for zero sized data should be avoided even if Bump allocator allows it.
-            // Plus, we change its address to make it have fixed address for equality test.
-            // But this would change nothing actually.
+            // Avoid allocation for zero-sized data even if the bump allocator allows it. We also
+            // rewrite the address to a fixed value for equality tests; this does not change the
+            // represented value.
             if layout.size() == 0 {
-                // Safety: Making a pointer to ZST and acessing through it is safe.
+                // Safety: Making a pointer to a ZST and accessing it through that pointer is safe.
                 let mut ptr = value as *const K;
                 let addr_part = &mut ptr as *mut *const K as *mut *const () as *mut usize;
                 *addr_part = layout.align(); // Like ptr::dangling()
@@ -433,6 +437,7 @@ impl<S: BuildHasher> DroplessInternSet<S> {
         }
     }
 
+    /// Stores a value formatted through [`Display`] as an interned string.
     pub fn intern_formatted_str<K: Display + ?Sized>(
         &mut self,
         value: &K,
@@ -445,10 +450,10 @@ impl<S: BuildHasher> DroplessInternSet<S> {
         unsafe {
             let layout = Layout::from_size_align_unchecked(bytes.len(), 1);
 
-            // We change address to make it have fixed address for equality test.
-            // But this would change nothing actually.
+            // Rewrite the address to a fixed value for equality tests. This does not change the
+            // represented value.
             if bytes.is_empty() {
-                // Safety: Making a pointer to ZST and acessing through it is safe.
+                // Safety: Making a pointer to a ZST and accessing it through that pointer is safe.
                 let dangling_ptr = NonNull::<u8>::dangling().as_ptr().cast_const();
                 let empty_slice = slice::from_raw_parts(dangling_ptr, 0);
                 let empty_str = std::str::from_utf8_unchecked(empty_slice);
@@ -460,8 +465,8 @@ impl<S: BuildHasher> DroplessInternSet<S> {
             let hasher = Self::table_hasher(&self.hash_builder);
             let ref_ = match self.set.entry(hash, eq, hasher) {
                 Entry::Occupied(entry) => {
-                    // Discards the change to the string buffer by just dropping the `write_buf`
-                    // because we have the same value in the bump alloator.
+                    // Discard the change to the string buffer by dropping `write_buf`, because the
+                    // same value already exists in the bump allocator.
                     // drop(write_buf);
 
                     Self::ref_from_entry(entry.get())
@@ -488,7 +493,7 @@ impl<S: BuildHasher> DroplessInternSet<S> {
         }
     }
 
-    /// # Eaxmples
+    /// # Examples
     ///
     /// ```
     /// use any_intern::DroplessInternSet;
@@ -513,20 +518,23 @@ impl<S: BuildHasher> DroplessInternSet<S> {
         }
     }
 
+    /// Returns the number of values in the set.
     pub fn len(&self) -> usize {
         self.set.len()
     }
 
+    /// Returns `true` if the set is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Removes all items in the set.
     pub fn clear(&mut self) {
         self.bump.reset();
         self.set.clear();
     }
 
-    /// Returns `eq` closure that is used for some methods on the [`HashTable`].
+    /// Returns the `eq` closure used by some [`HashTable`] methods.
     #[inline]
     fn table_eq<'a, K: Dropless + ?Sized>(
         key: &'a [u8],
@@ -543,7 +551,7 @@ impl<S: BuildHasher> DroplessInternSet<S> {
         }
     }
 
-    /// Returns `hasher` closure that is used for some methods on the [`HashTable`].
+    /// Returns the `hasher` closure used by some [`HashTable`] methods.
     #[inline]
     fn table_hasher<'a>(hash_builder: &'a S) -> impl Fn(&DynInternEntry<S>) -> u64 + 'a {
         |entry: &DynInternEntry<S>| unsafe {
@@ -791,7 +799,7 @@ mod tests {
         // Interns lots of items.
         for (i, str_) in strs.iter().enumerate().take(N) {
             let int = &(i as u32); // 4 bytes
-            let str_ = str_.as_str(); // greater than 4 btyes
+            let str_ = str_.as_str(); // greater than 4 bytes
             let bytes = &[i as u16]; // 2 bytes
             interned_int.push(interner.intern(int).erased_raw());
             interned_str.push(interner.intern(str_).erased_raw());
@@ -819,7 +827,7 @@ mod tests {
         // Verifies `get` method for every item.
         for (i, str_) in strs.iter().enumerate().take(N) {
             let int = &(i as u32); // 4 bytes
-            let str_ = str_.as_str(); // greater than 4 btyes
+            let str_ = str_.as_str(); // greater than 4 bytes
             let bytes = &[i as u16]; // 2 bytes
             assert_eq!(interner.get(int).as_deref(), Some(int));
             assert_eq!(interner.get(str_).as_deref(), Some(str_));
@@ -859,10 +867,9 @@ mod tests {
         #[cfg(miri)]
         const N: usize = 50;
 
-        // Items being interned have the same first 2 bytes, so they will look like the smae from
-        // perspective of interner. But, they must be distinguished from each other due to their
-        // different layouts. Following bytes after the 2 bytes will be used to detect data
-        // validity.
+        // Items being interned have the same first 2 bytes, so they look identical from the
+        // interner's perspective. They still must be distinguished from each other because their
+        // layouts differ. The bytes after the first 2 bytes are used to detect data validity.
         for i in 0..N {
             let t4 = T4(i as u16, [4; _]);
             let t8 = T8(i as u16, [8; _]);
@@ -916,7 +923,7 @@ mod tests {
         assert_eq!(&*interned, s.as_str());
     }
 
-    // UB if the interner gets a mutable reference to a whole chunk while a reference(i0) is alive.
+    // UB if the interner gets a mutable reference to a whole chunk while reference `i0` is alive.
     fn test_dropless_interner_consecutive_formatted_strs() {
         let dropless = DroplessInterner::new();
 

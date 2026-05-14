@@ -10,17 +10,19 @@ use std::{
     sync::Arc,
 };
 
-/// Due to [`Prv`], clients cannot make this type directly, but still allowed to use pattern
-/// match.
+/// `Prv` prevents clients from constructing this type directly, while still allowing pattern
+/// matching.
 pub struct Interned<'a, T: ?Sized>(pub &'a T, Prv);
 
 impl<'a, T: ?Sized> Interned<'a, T> {
+    /// Returns the typed raw pointer for this interned value.
     pub fn raw(&self) -> RawInterned<T> {
-        // Safety: A reference is non-null
+        // Safety: A reference is non-null.
         let ptr = unsafe { NonNull::new_unchecked(self.0 as *const T as *mut T) };
         RawInterned(ptr)
     }
 
+    /// Returns the type-erased raw pointer for this interned value.
     pub fn erased_raw(&self) -> RawInterned {
         let ptr = unsafe { NonNull::new_unchecked(self.0 as *const T as *mut T) };
         RawInterned(ptr.cast::<Prv>())
@@ -138,11 +140,13 @@ pub struct RawInterned<T: ?Sized = Prv>(pub(crate) NonNull<T>);
 
 impl<T: ?Sized> RawInterned<T> {
     #[inline]
+    /// Casts this raw interned pointer to another type.
     pub fn cast<U>(self) -> RawInterned<U> {
         RawInterned(self.0.cast())
     }
 
     #[inline]
+    /// Erases the pointee type from this raw interned pointer.
     pub fn erase(self) -> RawInterned {
         RawInterned(self.0.cast())
     }
@@ -213,13 +217,14 @@ impl<T: ?Sized> fmt::Debug for RawInterned<T> {
 pub struct Prv;
 
 #[derive(Clone)]
+/// A mutex wrapper with caller-managed `Send` and `Sync` invariants.
 pub struct UnsafeLock<T: ?Sized> {
     inner: Arc<ManualMutex<T>>,
 }
 
-/// Unlike [`Mutex`], this lock is `Send` and `Sync` regardless of whether `T` is `Send` or not.
-/// That's because `T` is always under the protection of this lock whenever clients uphold the
-/// safety of the lock.
+/// Unlike [`Mutex`], this lock is `Send` and `Sync` regardless of whether `T` is `Send`. This is
+/// sound because `T` is always protected by this lock whenever clients uphold the lock's safety
+/// contract.
 ///
 /// # Safety
 ///

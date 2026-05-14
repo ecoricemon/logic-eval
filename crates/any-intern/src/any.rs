@@ -14,9 +14,9 @@ use std::{
 
 /// A type-erased interner for storing and deduplicating values of a single type.
 ///
-/// This interner is simply a wrapper of [`AnyInternSet`] with interior mutability. If you need a
-/// collection of interners for various types like a hash map of interners, then consider using the
-/// `AnyInterSet` with a container providing interior mutability such as [`ManualMutex`].
+/// This interner is a wrapper around [`AnyInternSet`] with interior mutability. If you need a
+/// collection of interners for various types, such as a hash map of interners, consider using
+/// `AnyInterSet` with a container providing interior mutability.
 ///
 /// # Examples
 ///
@@ -48,26 +48,28 @@ pub struct AnyInterner<S = fxhash::FxBuildHasher> {
 }
 
 impl AnyInterner {
+    /// Creates an interner for values of type `K`.
     pub fn of<K: 'static>() -> Self {
-        // Safety: Only one instance
+        // Safety: Only one instance exists.
         let inner = unsafe { UnsafeLock::new(AnyInternSet::of::<K>()) };
         Self { inner }
     }
 }
 
 impl<S: BuildHasher> AnyInterner<S> {
+    /// Creates an interner for values of type `K` with a custom hasher.
     pub fn with_hasher<K: 'static>(hash_builder: S) -> Self {
-        // Safety: Only one instance
+        // Safety: Only one instance exists.
         let inner = unsafe { UnsafeLock::new(AnyInternSet::with_hasher::<K>(hash_builder)) };
         Self { inner }
     }
 
-    /// Returns number of values the interner contains.
+    /// Returns the number of values the interner contains.
     pub fn len(&self) -> usize {
         self.with_inner(|set| set.len())
     }
 
-    /// Returns true if the interner is empty.
+    /// Returns `true` if the interner is empty.
     pub fn is_empty(&self) -> bool {
         self.with_inner(|set| set.is_empty())
     }
@@ -164,7 +166,7 @@ impl<S: BuildHasher> AnyInterner<S> {
     /// This method checks if a value corresponding to the given key exists in the interner. If it
     /// exists, a reference to the interned value is returned. Otherwise, `None` is returned.
     ///
-    /// # Eaxmples
+    /// # Examples
     ///
     /// ```
     /// use any_intern::AnyInterner;
@@ -188,15 +190,15 @@ impl<S: BuildHasher> AnyInterner<S> {
         self.with_inner(|set| unsafe { set.get(key) })
     }
 
-    /// Returns true if the interner contains values of the given type.
+    /// Returns `true` if the interner contains values of the given type.
     pub fn is_type_of<K: 'static>(&self) -> bool {
         self.with_inner(|set| set.is_type_of::<K>())
     }
 
     /// Removes all items in the interner.
     ///
-    /// Although the interner support interior mutability, clear method requires mutable access
-    /// to the interner to invalidate all [`Interned`]s referencing the interner.
+    /// Although the interner supports interior mutability, `clear` requires mutable access to
+    /// invalidate all [`Interned`] values referencing the interner.
     pub fn clear(&mut self) {
         self.with_inner(|set| set.clear())
     }
@@ -206,7 +208,7 @@ impl<S: BuildHasher> AnyInterner<S> {
         F: FnOnce(&'this mut AnyInternSet<S>) -> R,
         R: 'this,
     {
-        // Safety: Mutex unlocking is paired with the locking.
+        // Safety: Unlocking is paired with locking.
         unsafe {
             let set = self.inner.lock().as_mut();
             let ret = f(set);
@@ -251,6 +253,7 @@ pub struct AnyInternSet<S = fxhash::FxBuildHasher> {
 }
 
 impl AnyInternSet {
+    /// Creates an intern set for values of type `K`.
     pub fn of<K: 'static>() -> Self {
         Self {
             arena: AnyArena::of::<K>(),
@@ -261,6 +264,7 @@ impl AnyInternSet {
 }
 
 impl<S: Default> AnyInternSet<S> {
+    /// Creates an intern set for values of type `K` with the default hasher.
     pub fn default_of<K: 'static>() -> Self {
         Self {
             arena: AnyArena::of::<K>(),
@@ -271,6 +275,7 @@ impl<S: Default> AnyInternSet<S> {
 }
 
 impl<S: BuildHasher> AnyInternSet<S> {
+    /// Creates an intern set for values of type `K` with a custom hasher.
     pub fn with_hasher<K: 'static>(hash_builder: S) -> Self {
         Self {
             arena: AnyArena::of::<K>(),
@@ -279,12 +284,12 @@ impl<S: BuildHasher> AnyInternSet<S> {
         }
     }
 
-    /// Returns number of values in the set.
+    /// Returns the number of values in the set.
     pub fn len(&self) -> usize {
         self.arena.len()
     }
 
-    /// Returns true if the set is empty.
+    /// Returns `true` if the set is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -413,7 +418,7 @@ impl<S: BuildHasher> AnyInternSet<S> {
     /// This method checks if a value corresponding to the given key exists in the set. If it
     /// exists, a reference to the value is returned. Otherwise, `None` is returned.
     ///
-    /// # Eaxmples
+    /// # Examples
     ///
     /// ```
     /// use any_intern::AnyInternSet;
@@ -445,7 +450,7 @@ impl<S: BuildHasher> AnyInternSet<S> {
         }
     }
 
-    /// Returns true if the set contains values of the given type.
+    /// Returns `true` if the set contains values of the given type.
     pub fn is_type_of<K: 'static>(&self) -> bool {
         self.arena.is_type_of::<K>()
     }
@@ -456,7 +461,7 @@ impl<S: BuildHasher> AnyInternSet<S> {
         self.set.clear();
     }
 
-    /// Returns `eq` closure that is used for some methods on the [`HashTable`].
+    /// Returns the `eq` closure used by some [`HashTable`] methods.
     ///
     /// # Safety
     ///
@@ -472,7 +477,7 @@ impl<S: BuildHasher> AnyInternSet<S> {
         }
     }
 
-    /// Returns `hasher` closure that is used for some methods on the [`HashTable`].
+    /// Returns the `hasher` closure used by some [`HashTable`] methods.
     ///
     /// # Safety
     ///
@@ -495,6 +500,7 @@ impl<S: BuildHasher> AnyInternSet<S> {
     }
 }
 
+/// Type-erased arena for storing values of one concrete type.
 pub struct AnyArena {
     bump: Bump,
     ty: TypeId,
@@ -504,6 +510,7 @@ pub struct AnyArena {
 }
 
 impl AnyArena {
+    /// Creates an arena for values of type `T`.
     pub fn of<T: 'static>() -> Self {
         Self {
             bump: Bump::new(),
@@ -518,19 +525,22 @@ impl AnyArena {
         }
     }
 
+    /// Returns `true` if this arena stores values of type `T`.
     pub fn is_type_of<T: 'static>(&self) -> bool {
         TypeId::of::<T>() == self.ty
     }
 
-    /// Returns number of elements in this arena.
+    /// Returns the number of elements in this arena.
     pub fn len(&self) -> usize {
         self.len.get()
     }
 
+    /// Returns `true` if this arena is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Allocates `value` in the arena.
     pub fn alloc<T: 'static>(&self, value: T) -> &mut T {
         debug_assert!(self.is_type_of::<T>());
 
@@ -538,6 +548,7 @@ impl AnyArena {
         self.bump.alloc(value)
     }
 
+    /// Drops all stored values and clears the arena.
     pub fn clear(&mut self) {
         self.drop_all();
         self.bump.reset();

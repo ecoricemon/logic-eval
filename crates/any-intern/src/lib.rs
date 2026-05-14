@@ -67,6 +67,7 @@ pub struct Interner<S = fxhash::FxBuildHasher> {
 }
 
 impl Interner {
+    /// Creates an empty generic interner.
     pub fn new() -> Self {
         Self::default()
     }
@@ -197,15 +198,15 @@ impl<S: BuildHasher> Interner<S> {
         })
     }
 
-    /// Stores the given dropless value in the interner then returns reference to the value if the
-    /// interner doesn't contain the same value yet.
+    /// Stores the given dropless value in the interner, then returns a reference to the value if
+    /// the interner does not contain the same value yet.
     ///
-    /// If the same value exists in the interner, reference to the existing value is returned.
+    /// If the same value exists in the interner, a reference to the existing value is returned.
     ///
-    /// This method does not take the value's ownership. Instead, it copies the value into the
-    /// interner's memory, then returns reference to that.
+    /// This method does not take ownership of the value. Instead, it copies the value into the
+    /// interner's memory, then returns a reference to that copy.
     ///
-    /// # Eaxmples
+    /// # Examples
     ///
     /// ```
     /// use any_intern::Interner;
@@ -221,16 +222,15 @@ impl<S: BuildHasher> Interner<S> {
         self.dropless.intern(value)
     }
 
-    /// Stores a value in the interner as a formatted string through [`Display`] then returns
-    /// reference to the value if the interner doesn't contain the formatted string yet.
+    /// Stores a value in the interner as a formatted string through [`Display`], then returns a
+    /// reference to the value if the interner does not contain the formatted string yet.
     ///
-    /// If the same string exists in the interner, reference to the existing string is returned.
+    /// If the same string exists in the interner, a reference to the existing string is returned.
     ///
-    /// This method provides a buffer for making string. This will be benefit in terms of
-    /// performance when you frequently make `String` via something like `to_string()` by exploiting
-    /// chunk memory.
+    /// This method provides a buffer for building strings. This can improve performance when you
+    /// frequently create `String`s with something like `to_string()` by reusing chunk memory.
     ///
-    /// If you give insufficient `upper_size`, then error is returned.
+    /// Returns an error if `upper_size` is too small.
     ///
     /// # Examples
     ///
@@ -256,7 +256,7 @@ impl<S: BuildHasher> Interner<S> {
     /// This method checks if a value corresponding to the given key exists in the interner. If it
     /// exists, a reference to the interned value is returned. Otherwise, `None` is returned.
     ///
-    /// # Eaxmples
+    /// # Examples
     ///
     /// ```
     /// use any_intern::Interner;
@@ -271,21 +271,21 @@ impl<S: BuildHasher> Interner<S> {
         self.dropless.get(value)
     }
 
-    /// Returns number of values the interner contains.
+    /// Returns the number of values the interner contains.
     pub fn len(&self) -> usize {
         self.with_any_sets(|sets| sets.values().map(AnyInternSet::len).sum::<usize>())
             + self.dropless.len()
     }
 
-    /// Returns true if the interner is empty.
+    /// Returns `true` if the interner is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Removes all values in the interner.
     ///
-    /// Although the interner support interior mutability, clear method requires mutable access
-    /// to the interner to invalidate all [`Interned`]s referencing the interner.
+    /// Although the interner supports interior mutability, `clear` requires mutable access to
+    /// invalidate all [`Interned`] values referencing the interner.
     pub fn clear(&mut self) {
         self.with_any_sets(|sets| {
             for set in sets.values_mut() {

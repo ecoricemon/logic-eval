@@ -21,7 +21,7 @@ pub(crate) fn canonicalize_term(term: &mut Term<Integer>) {
     term.replace_variables(|functor| *functor = c(*functor));
 }
 
-/// Applies [`canonicalize_term`] on each term without crossing term boundaries.
+/// Applies [`canonicalize_term`] to each term without crossing term boundaries.
 ///
 /// e.g. f($X), g($Y, $X) -> f($0), g($0, $1) (not f($0), g($1, $0))
 pub(crate) fn canonicalize_expr_on_term(expr: &mut Expr<Integer>) {

@@ -1,32 +1,38 @@
 use crate::Map;
 use std::{borrow::Borrow, hash::Hash};
 
+/// A scoped symbol table with transparent and opaque block boundaries.
 #[derive(Debug)]
 pub struct SymbolTable<K, V> {
     map: Map<K, Vec<Symbol<V>>>,
 }
 
 impl<K, V> SymbolTable<K, V> {
+    /// Removes every symbol and block marker.
     pub fn clear(&mut self) {
         self.map.clear();
     }
 
+    /// Returns `true` if the table contains no symbols or block markers.
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
     }
 
+    /// Pushes a block boundary that allows lookup to continue into outer blocks.
     pub fn push_transparent_block(&mut self) {
         for v in self.map.values_mut() {
             v.push(Symbol::Transparent);
         }
     }
 
+    /// Pushes a block boundary that hides symbols in outer blocks.
     pub fn push_opaque_block(&mut self) {
         for v in self.map.values_mut() {
             v.push(Symbol::Opaque);
         }
     }
 
+    /// Pops symbols from the current block.
     pub fn pop_block(&mut self) {
         for v in self.map.values_mut() {
             while let Some(Symbol::Data(_)) = v.pop() {}
@@ -36,6 +42,7 @@ impl<K, V> SymbolTable<K, V> {
 }
 
 impl<K: Hash + Eq, V> SymbolTable<K, V> {
+    /// Pushes a symbol binding for `name`.
     pub fn push(&mut self, name: K, symbol: V) {
         if let Some(v) = self.map.get_mut(&name) {
             v.push(Symbol::Data(symbol));
@@ -44,6 +51,7 @@ impl<K: Hash + Eq, V> SymbolTable<K, V> {
         }
     }
 
+    /// Pops the most recent symbol binding for `name`.
     pub fn pop<Q>(&mut self, name: &Q) -> Option<V>
     where
         K: Borrow<Q>,
@@ -55,6 +63,7 @@ impl<K: Hash + Eq, V> SymbolTable<K, V> {
         }
     }
 
+    /// Returns the visible symbol binding for `name`.
     pub fn get<Q>(&self, name: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
@@ -67,6 +76,7 @@ impl<K: Hash + Eq, V> SymbolTable<K, V> {
         })?
     }
 
+    /// Returns the visible mutable symbol binding for `name`.
     pub fn get_mut<Q>(&mut self, name: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,

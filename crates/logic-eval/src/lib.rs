@@ -18,6 +18,7 @@ pub use prove::{
     prover::ProveCx,
 };
 
+/// Re-exports of the interning types used by this crate.
 pub mod intern {
     pub use any_intern::*;
 }

@@ -8,6 +8,7 @@ use std::{
     vec::IntoIter,
 };
 
+/// A collection of parsed clauses.
 #[derive(Clone, Debug, Hash)]
 pub struct ClauseDataset<T>(pub Vec<Clause<T>>);
 
@@ -28,17 +29,22 @@ impl<T> ops::Deref for ClauseDataset<T> {
     }
 }
 
+/// A fact or rule clause.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Clause<T> {
+    /// The clause head.
     pub head: Term<T>,
+    /// The optional rule body.
     pub body: Option<Expr<T>>,
 }
 
 impl<T> Clause<T> {
+    /// Creates a fact clause.
     pub fn fact(head: Term<T>) -> Self {
         Self { head, body: None }
     }
 
+    /// Creates a rule clause with a head and body.
     pub fn rule(head: Term<T>, body: Expr<T>) -> Self {
         Self {
             head,
@@ -46,6 +52,7 @@ impl<T> Clause<T> {
         }
     }
 
+    /// Maps every atom in the clause to another type.
     pub fn map<U, F: FnMut(T) -> U>(self, f: &mut F) -> Clause<U> {
         Clause {
             head: self.head.map(f),
@@ -53,6 +60,7 @@ impl<T> Clause<T> {
         }
     }
 
+    /// Replaces every matching term in the clause.
     pub fn replace_term<F>(&mut self, f: &mut F)
     where
         F: FnMut(&Term<T>) -> Option<Term<T>>,
@@ -65,7 +73,7 @@ impl<T> Clause<T> {
 }
 
 impl Clause<Integer> {
-    /// Returns true if the clause needs SLG resolution (tabling).
+    /// Returns `true` if the clause needs SLG resolution (tabling).
     ///
     /// If a clause has left or mid recursion, it must be handled by tabling.
     ///
@@ -113,13 +121,17 @@ impl<T: Display> Display for Clause<T> {
     }
 }
 
+/// A logic term with a functor and zero or more arguments.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Term<T> {
+    /// The term functor.
     pub functor: T,
+    /// The term arguments.
     pub args: Vec<Term<T>>,
 }
 
 impl<T> Term<T> {
+    /// Creates an atom term with no arguments.
     pub fn atom(functor: T) -> Self {
         Term {
             functor,
@@ -127,6 +139,7 @@ impl<T> Term<T> {
         }
     }
 
+    /// Creates a compound term from a functor and arguments.
     pub fn compound<I: IntoIterator<Item = Term<T>>>(functor: T, args: I) -> Self {
         Term {
             functor,
@@ -134,6 +147,7 @@ impl<T> Term<T> {
         }
     }
 
+    /// Maps every atom in the term to another type.
     pub fn map<U, F: FnMut(T) -> U>(self, f: &mut F) -> Term<U> {
         Term {
             functor: f(self.functor),
@@ -141,6 +155,7 @@ impl<T> Term<T> {
         }
     }
 
+    /// Replaces this term and all nested terms that match `f`.
     pub fn replace_all<F>(&mut self, f: &mut F) -> bool
     where
         F: FnMut(&Term<T>) -> Option<Term<T>>,
@@ -159,6 +174,7 @@ impl<T> Term<T> {
 }
 
 impl<T: Clone> Term<T> {
+    /// Returns this term's predicate.
     pub fn predicate(&self) -> Predicate<T> {
         Predicate {
             functor: self.functor.clone(),
@@ -168,6 +184,7 @@ impl<T: Clone> Term<T> {
 }
 
 impl<T: Atom> Term<T> {
+    /// Returns `true` if this term is a variable.
     pub fn is_variable(&self) -> bool {
         let is_variable = self.functor.is_variable();
 
@@ -179,6 +196,7 @@ impl<T: Atom> Term<T> {
         is_variable
     }
 
+    /// Returns `true` if this term contains a variable.
     pub fn contains_variable(&self) -> bool {
         if self.is_variable() {
             return true;
@@ -187,6 +205,7 @@ impl<T: Atom> Term<T> {
         self.args.iter().any(|arg| arg.contains_variable())
     }
 
+    /// Applies `f` to every variable functor in the term.
     pub fn replace_variables<F: FnMut(&mut T)>(&mut self, mut f: F) {
         fn helper<T, F>(term: &mut Term<T>, f: &mut F)
         where
@@ -222,39 +241,51 @@ impl<T: Display> Display for Term<T> {
     }
 }
 
+/// A logic expression.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Expr<T> {
+    /// A term expression.
     Term(Term<T>),
+    /// Logical negation.
     Not(Box<Expr<T>>),
+    /// Logical conjunction.
     And(Vec<Expr<T>>),
+    /// Logical disjunction.
     Or(Vec<Expr<T>>),
 }
 
 impl<T> Expr<T> {
+    /// Creates an expression from a term.
     pub fn term(term: Term<T>) -> Self {
         Self::Term(term)
     }
 
+    /// Creates an atom term expression.
     pub fn term_atom(functor: T) -> Self {
         Self::Term(Term::atom(functor))
     }
 
+    /// Creates a compound term expression.
     pub fn term_compound<I: IntoIterator<Item = Term<T>>>(functor: T, args: I) -> Self {
         Self::Term(Term::compound(functor, args))
     }
 
+    /// Creates a negated expression.
     pub fn expr_not(expr: Expr<T>) -> Self {
         Self::Not(Box::new(expr))
     }
 
+    /// Creates a conjunction expression.
     pub fn expr_and<I: IntoIterator<Item = Expr<T>>>(args: I) -> Self {
         Self::And(args.into_iter().collect())
     }
 
+    /// Creates a disjunction expression.
     pub fn expr_or<I: IntoIterator<Item = Expr<T>>>(args: I) -> Self {
         Self::Or(args.into_iter().collect())
     }
 
+    /// Maps every atom in the expression to another type.
     pub fn map<U, F: FnMut(T) -> U>(self, f: &mut F) -> Expr<U> {
         match self {
             Self::Term(term) => Expr::Term(term.map(f)),
@@ -264,6 +295,7 @@ impl<T> Expr<T> {
         }
     }
 
+    /// Replaces every matching term in the expression.
     pub fn replace_term<F>(&mut self, f: &mut F)
     where
         F: FnMut(&Term<T>) -> Option<Term<T>>,
@@ -283,6 +315,7 @@ impl<T> Expr<T> {
 }
 
 impl<T: PartialEq> Expr<T> {
+    /// Returns `true` if this expression contains `term`.
     pub fn contains_term(&self, term: &Term<T>) -> bool {
         match self {
             Self::Term(t) => t == term,
@@ -356,9 +389,12 @@ impl<T: Display> Display for Expr<T> {
     }
 }
 
+/// Predicate identity, represented by functor and arity.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Predicate<T> {
+    /// Predicate functor.
     pub functor: T,
+    /// Predicate arity.
     pub arity: u32,
 }
 

@@ -68,8 +68,8 @@ impl<'int, Int: Intern> Parse<'int, Int> for TermIn<'int, Int> {
 
 // Precedence: `Paren ()` -> `Not \+` -> `And ,` -> `Or ;`.
 // - So, `parse_or` is the entry point to parse an Expr.
-// - Plus, caller is supposed to give the exact buffer for an Expr. This can be done by detecting
-//   end of clause or something like that. That's why methods here don't take `&mut ParseBuffer`.
+// - The caller is expected to provide the exact buffer for an Expr. This can be done by detecting
+//   the end of the clause, so these methods do not take `&mut ParseBuffer`.
 impl Expr<Name<()>> {
     fn parse_or<'int, Int: Intern>(
         buf: ParseBuffer<'_>,
@@ -214,6 +214,7 @@ impl Term<Name<()>> {
 pub struct Name<T>(T);
 
 impl<T: AsRef<str>> Name<T> {
+    /// Creates a non-empty name.
     pub fn new(s: T) -> Self {
         assert!(!s.as_ref().is_empty());
         Self(s)
@@ -221,6 +222,7 @@ impl<T: AsRef<str>> Name<T> {
 }
 
 impl Name<()> {
+    /// Interns `s` and returns a name backed by the interner.
     pub fn with_intern<'int, Int: Intern>(s: &str, interner: &'int Int) -> NameIn<'int, Int> {
         assert!(!s.is_empty());
         let interned = interner.intern_str(s);

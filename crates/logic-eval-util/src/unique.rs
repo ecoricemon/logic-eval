@@ -20,6 +20,7 @@ pub struct UniqueContainer<T> {
 }
 
 impl<T> UniqueContainer<T> {
+    /// Creates an empty container.
     pub fn new() -> Self {
         Self {
             values: Values::new(),
@@ -27,22 +28,27 @@ impl<T> UniqueContainer<T> {
         }
     }
 
+    /// Returns the number of indices in the container.
     pub fn len(&self) -> usize {
         self.values.len()
     }
 
+    /// Returns `true` if the container is empty.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// Returns the value at `index`, following indirect entries.
     pub fn get(&self, index: usize) -> Option<&T> {
         self.values.get(index)
     }
 
+    /// Iterates over `(index, value)` pairs for real data entries.
     pub fn iter(&self) -> PairIter<'_, T> {
         self.values.iter()
     }
 
+    /// Iterates over unique values.
     pub fn values(&self) -> ValueIter<'_, T> {
         self.values.values()
     }
@@ -88,6 +94,7 @@ where
         index
     }
 
+    /// Returns the existing index for `value`, or the next insertion index.
     pub fn next_index<Q>(&mut self, value: &Q) -> usize
     where
         Q: Hash + PartialEq<T> + ?Sized,
@@ -95,6 +102,7 @@ where
         self.find(value).unwrap_or(self.values.len())
     }
 
+    /// Replaces `old` with `new`, returning whether `old` was found.
     pub fn replace<Q>(&mut self, old: &Q, new: T) -> bool
     where
         Q: Hash + PartialEq<T> + ?Sized,
@@ -142,6 +150,7 @@ where
         }
     }
 
+    /// Finds the index of `value`.
     pub fn find<Q>(&self, value: &Q) -> Option<usize>
     where
         Q: Hash + PartialEq<T> + ?Sized,
