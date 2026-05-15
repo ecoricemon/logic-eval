@@ -15,3 +15,15 @@ logic-eval-util = { workspace = true }
 indexmap = { workspace = true }
 fxhash = { workspace = true }
 smallvec = { workspace = true }
+
+[[example]]
+name = "meal_recommendation"
+path = "examples/meal_recommendation.rs"
+
+[[example]]
+name = "access_control"
+path = "examples/access_control.rs"
+
+[[example]]
+name = "dependency_graph"
+path = "examples/dependency_graph.rs"

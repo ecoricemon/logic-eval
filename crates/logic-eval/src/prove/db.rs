@@ -712,6 +712,137 @@ mod str_atom_tests {
     }
 
     #[test]
+    fn test_and_has_higher_precedence_than_or() {
+        let mut db = Database::new();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            member(alice).
+            member(bob).
+
+            paid(bob).
+
+            staff(carol).
+
+            allowed($X) :- member($X), paid($X); staff($X).
+            ",
+        );
+
+        let query: Expr<'_> = parse::parse_str("allowed(alice).", &interner).unwrap();
+        let answer = collect_answer(db.query(query));
+        assert!(answer.is_empty());
+
+        let query: Expr<'_> = parse::parse_str("allowed(bob).", &interner).unwrap();
+        let answer = collect_answer(db.query(query));
+        assert_eq!(answer.len(), 1);
+
+        let query: Expr<'_> = parse::parse_str("allowed(carol).", &interner).unwrap();
+        let answer = collect_answer(db.query(query));
+        assert_eq!(answer.len(), 1);
+    }
+
+    #[test]
+    fn test_parentheses_override_and_or_precedence() {
+        let mut db = Database::new();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            member(alice).
+            member(bob).
+
+            paid(bob).
+
+            staff(carol).
+
+            allowed($X) :- member($X), (paid($X); staff($X)).
+            ",
+        );
+
+        let query: Expr<'_> = parse::parse_str("allowed($X).", &interner).unwrap();
+        let answer = collect_answer(db.query(query));
+        let expected = [["$X = bob"]];
+        assert_eq!(answer, expected);
+    }
+
+    #[test]
+    fn test_not_applies_to_parenthesized_or() {
+        let mut db = Database::new();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            candidate(alice).
+            candidate(bob).
+            candidate(carol).
+            candidate(dana).
+
+            blocked(bob).
+            archived(carol).
+
+            active($X) :- candidate($X), \+ (blocked($X); archived($X)).
+            ",
+        );
+
+        let query: Expr<'_> = parse::parse_str("active($X).", &interner).unwrap();
+        let mut answer = collect_answer(db.query(query));
+        let mut expected = [vec!["$X = alice".to_owned()], vec!["$X = dana".to_owned()]];
+
+        answer.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(answer, expected);
+    }
+
+    #[test]
+    fn test_not_with_grouped_and_or_expression() {
+        let mut db = Database::new();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            task(cleanup).
+            task(deploy).
+            task(report).
+            task(backup).
+
+            urgent(deploy).
+            urgent(report).
+
+            owner(alice, cleanup).
+            owner(alice, report).
+            owner(bob, backup).
+
+            blocked(report).
+
+            todo_for_alice($Task) :-
+                task($Task),
+                (urgent($Task); owner(alice, $Task)),
+                \+ blocked($Task).
+            ",
+        );
+
+        let query: Expr<'_> = parse::parse_str("todo_for_alice($Task).", &interner).unwrap();
+        let mut answer = collect_answer(db.query(query));
+        let mut expected = [
+            vec!["$Task = cleanup".to_owned()],
+            vec!["$Task = deploy".to_owned()],
+        ];
+
+        answer.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(answer, expected);
+    }
+
+    #[test]
     fn test_simple_recursion() {
         let mut db = Database::new();
         let interner = Interner::new();
