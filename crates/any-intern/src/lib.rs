@@ -68,6 +68,15 @@ pub struct Interner<S = fxhash::FxBuildHasher> {
 
 impl Interner {
     /// Creates an empty generic interner.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::Interner;
+    ///
+    /// let interner = Interner::new();
+    /// assert!(interner.is_empty());
+    /// ```
     pub fn new() -> Self {
         Self::default()
     }
@@ -272,12 +281,37 @@ impl<S: BuildHasher> Interner<S> {
     }
 
     /// Returns the number of values the interner contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::Interner;
+    ///
+    /// let interner = Interner::new();
+    /// assert_eq!(interner.len(), 0);
+    ///
+    /// interner.intern_static(1_u32);
+    /// interner.intern_dropless("one");
+    /// assert_eq!(interner.len(), 2);
+    /// ```
     pub fn len(&self) -> usize {
         self.with_any_sets(|sets| sets.values().map(AnyInternSet::len).sum::<usize>())
             + self.dropless.len()
     }
 
     /// Returns `true` if the interner is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::Interner;
+    ///
+    /// let interner = Interner::new();
+    /// assert!(interner.is_empty());
+    ///
+    /// interner.intern_static(1_u32);
+    /// assert!(!interner.is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -286,6 +320,20 @@ impl<S: BuildHasher> Interner<S> {
     ///
     /// Although the interner supports interior mutability, `clear` requires mutable access to
     /// invalidate all [`Interned`] values referencing the interner.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::Interner;
+    ///
+    /// let mut interner = Interner::new();
+    /// interner.intern_static(1_u32);
+    /// interner.intern_dropless("one");
+    /// assert!(!interner.is_empty());
+    ///
+    /// interner.clear();
+    /// assert!(interner.is_empty());
+    /// ```
     pub fn clear(&mut self) {
         self.with_any_sets(|sets| {
             for set in sets.values_mut() {

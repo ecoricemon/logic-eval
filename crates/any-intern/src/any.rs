@@ -49,6 +49,16 @@ pub struct AnyInterner<S = fxhash::FxBuildHasher> {
 
 impl AnyInterner {
     /// Creates an interner for values of type `K`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyInterner;
+    ///
+    /// let interner = AnyInterner::of::<u32>();
+    /// assert!(interner.is_type_of::<u32>());
+    /// assert!(interner.is_empty());
+    /// ```
     pub fn of<K: 'static>() -> Self {
         // Safety: Only one instance exists.
         let inner = unsafe { UnsafeLock::new(AnyInternSet::of::<K>()) };
@@ -58,6 +68,17 @@ impl AnyInterner {
 
 impl<S: BuildHasher> AnyInterner<S> {
     /// Creates an interner for values of type `K` with a custom hasher.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyInterner;
+    /// use std::hash::RandomState;
+    ///
+    /// let interner = AnyInterner::with_hasher::<u32>(RandomState::new());
+    /// assert!(interner.is_type_of::<u32>());
+    /// assert!(interner.is_empty());
+    /// ```
     pub fn with_hasher<K: 'static>(hash_builder: S) -> Self {
         // Safety: Only one instance exists.
         let inner = unsafe { UnsafeLock::new(AnyInternSet::with_hasher::<K>(hash_builder)) };
@@ -65,11 +86,39 @@ impl<S: BuildHasher> AnyInterner<S> {
     }
 
     /// Returns the number of values the interner contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyInterner;
+    ///
+    /// let interner = AnyInterner::of::<u32>();
+    /// assert_eq!(interner.len(), 0);
+    ///
+    /// unsafe {
+    ///     interner.intern(1_u32);
+    /// }
+    /// assert_eq!(interner.len(), 1);
+    /// ```
     pub fn len(&self) -> usize {
         self.with_inner(|set| set.len())
     }
 
     /// Returns `true` if the interner is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyInterner;
+    ///
+    /// let interner = AnyInterner::of::<u32>();
+    /// assert!(interner.is_empty());
+    ///
+    /// unsafe {
+    ///     interner.intern(1_u32);
+    /// }
+    /// assert!(!interner.is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.with_inner(|set| set.is_empty())
     }
@@ -191,6 +240,16 @@ impl<S: BuildHasher> AnyInterner<S> {
     }
 
     /// Returns `true` if the interner contains values of the given type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyInterner;
+    ///
+    /// let interner = AnyInterner::of::<u32>();
+    /// assert!(interner.is_type_of::<u32>());
+    /// assert!(!interner.is_type_of::<i32>());
+    /// ```
     pub fn is_type_of<K: 'static>(&self) -> bool {
         self.with_inner(|set| set.is_type_of::<K>())
     }
@@ -199,6 +258,20 @@ impl<S: BuildHasher> AnyInterner<S> {
     ///
     /// Although the interner supports interior mutability, `clear` requires mutable access to
     /// invalidate all [`Interned`] values referencing the interner.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyInterner;
+    ///
+    /// let mut interner = AnyInterner::of::<u32>();
+    /// unsafe {
+    ///     interner.intern(1_u32);
+    /// }
+    ///
+    /// interner.clear();
+    /// assert!(interner.is_empty());
+    /// ```
     pub fn clear(&mut self) {
         self.with_inner(|set| set.clear())
     }
@@ -254,6 +327,16 @@ pub struct AnyInternSet<S = fxhash::FxBuildHasher> {
 
 impl AnyInternSet {
     /// Creates an intern set for values of type `K`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyInternSet;
+    ///
+    /// let set = AnyInternSet::of::<u32>();
+    /// assert!(set.is_type_of::<u32>());
+    /// assert!(set.is_empty());
+    /// ```
     pub fn of<K: 'static>() -> Self {
         Self {
             arena: AnyArena::of::<K>(),
@@ -265,6 +348,17 @@ impl AnyInternSet {
 
 impl<S: Default> AnyInternSet<S> {
     /// Creates an intern set for values of type `K` with the default hasher.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyInternSet;
+    /// use std::hash::RandomState;
+    ///
+    /// let set = AnyInternSet::<RandomState>::default_of::<u32>();
+    /// assert!(set.is_type_of::<u32>());
+    /// assert!(set.is_empty());
+    /// ```
     pub fn default_of<K: 'static>() -> Self {
         Self {
             arena: AnyArena::of::<K>(),
@@ -276,6 +370,17 @@ impl<S: Default> AnyInternSet<S> {
 
 impl<S: BuildHasher> AnyInternSet<S> {
     /// Creates an intern set for values of type `K` with a custom hasher.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyInternSet;
+    /// use std::hash::RandomState;
+    ///
+    /// let set = AnyInternSet::with_hasher::<u32>(RandomState::new());
+    /// assert!(set.is_type_of::<u32>());
+    /// assert!(set.is_empty());
+    /// ```
     pub fn with_hasher<K: 'static>(hash_builder: S) -> Self {
         Self {
             arena: AnyArena::of::<K>(),
@@ -285,11 +390,39 @@ impl<S: BuildHasher> AnyInternSet<S> {
     }
 
     /// Returns the number of values in the set.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyInternSet;
+    ///
+    /// let mut set = AnyInternSet::of::<u32>();
+    /// assert_eq!(set.len(), 0);
+    ///
+    /// unsafe {
+    ///     set.intern(1_u32);
+    /// }
+    /// assert_eq!(set.len(), 1);
+    /// ```
     pub fn len(&self) -> usize {
         self.arena.len()
     }
 
     /// Returns `true` if the set is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyInternSet;
+    ///
+    /// let mut set = AnyInternSet::of::<u32>();
+    /// assert!(set.is_empty());
+    ///
+    /// unsafe {
+    ///     set.intern(1_u32);
+    /// }
+    /// assert!(!set.is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -451,11 +584,35 @@ impl<S: BuildHasher> AnyInternSet<S> {
     }
 
     /// Returns `true` if the set contains values of the given type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyInternSet;
+    ///
+    /// let set = AnyInternSet::of::<u32>();
+    /// assert!(set.is_type_of::<u32>());
+    /// assert!(!set.is_type_of::<i32>());
+    /// ```
     pub fn is_type_of<K: 'static>(&self) -> bool {
         self.arena.is_type_of::<K>()
     }
 
     /// Removes all items in the set.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyInternSet;
+    ///
+    /// let mut set = AnyInternSet::of::<u32>();
+    /// unsafe {
+    ///     set.intern(1_u32);
+    /// }
+    ///
+    /// set.clear();
+    /// assert!(set.is_empty());
+    /// ```
     pub fn clear(&mut self) {
         self.arena.clear();
         self.set.clear();
@@ -511,6 +668,16 @@ pub struct AnyArena {
 
 impl AnyArena {
     /// Creates an arena for values of type `T`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyArena;
+    ///
+    /// let arena = AnyArena::of::<u32>();
+    /// assert!(arena.is_type_of::<u32>());
+    /// assert!(arena.is_empty());
+    /// ```
     pub fn of<T: 'static>() -> Self {
         Self {
             bump: Bump::new(),
@@ -526,21 +693,67 @@ impl AnyArena {
     }
 
     /// Returns `true` if this arena stores values of type `T`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyArena;
+    ///
+    /// let arena = AnyArena::of::<u32>();
+    /// assert!(arena.is_type_of::<u32>());
+    /// assert!(!arena.is_type_of::<i32>());
+    /// ```
     pub fn is_type_of<T: 'static>(&self) -> bool {
         TypeId::of::<T>() == self.ty
     }
 
     /// Returns the number of elements in this arena.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyArena;
+    ///
+    /// let arena = AnyArena::of::<u32>();
+    /// assert_eq!(arena.len(), 0);
+    ///
+    /// arena.alloc(1_u32);
+    /// assert_eq!(arena.len(), 1);
+    /// ```
     pub fn len(&self) -> usize {
         self.len.get()
     }
 
     /// Returns `true` if this arena is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyArena;
+    ///
+    /// let arena = AnyArena::of::<u32>();
+    /// assert!(arena.is_empty());
+    ///
+    /// arena.alloc(1_u32);
+    /// assert!(!arena.is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Allocates `value` in the arena.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyArena;
+    ///
+    /// let arena = AnyArena::of::<String>();
+    /// let value = arena.alloc(String::from("hello"));
+    ///
+    /// assert_eq!(value, "hello");
+    /// assert_eq!(arena.len(), 1);
+    /// ```
     pub fn alloc<T: 'static>(&self, value: T) -> &mut T {
         debug_assert!(self.is_type_of::<T>());
 
@@ -549,6 +762,18 @@ impl AnyArena {
     }
 
     /// Drops all stored values and clears the arena.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::AnyArena;
+    ///
+    /// let mut arena = AnyArena::of::<u32>();
+    /// arena.alloc(1_u32);
+    ///
+    /// arena.clear();
+    /// assert!(arena.is_empty());
+    /// ```
     pub fn clear(&mut self) {
         self.drop_all();
         self.bump.reset();

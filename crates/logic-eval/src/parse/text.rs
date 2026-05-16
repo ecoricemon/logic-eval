@@ -215,6 +215,16 @@ pub struct Name<T>(T);
 
 impl<T: AsRef<str>> Name<T> {
     /// Creates a non-empty name.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::Name;
+    ///
+    /// let name = Name::new("sunny");
+    ///
+    /// assert_eq!(name.as_ref(), "sunny");
+    /// ```
     pub fn new(s: T) -> Self {
         assert!(!s.as_ref().is_empty());
         Self(s)
@@ -223,6 +233,17 @@ impl<T: AsRef<str>> Name<T> {
 
 impl Name<()> {
     /// Interns `s` and returns a name backed by the interner.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{Name, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let name = Name::with_intern("sunny", &interner);
+    ///
+    /// assert_eq!(name.as_ref(), "sunny");
+    /// ```
     pub fn with_intern<'int, Int: Intern>(s: &str, interner: &'int Int) -> NameIn<'int, Int> {
         assert!(!s.is_empty());
         let interned = interner.intern_str(s);

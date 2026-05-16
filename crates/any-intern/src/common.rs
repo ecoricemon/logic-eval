@@ -16,6 +16,18 @@ pub struct Interned<'a, T: ?Sized>(pub &'a T, Prv);
 
 impl<'a, T: ?Sized> Interned<'a, T> {
     /// Returns the typed raw pointer for this interned value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::Interner;
+    ///
+    /// let interner = Interner::new();
+    /// let value = interner.intern_static(42_u32);
+    /// let raw = value.raw();
+    ///
+    /// assert_eq!(raw.as_ptr(), (&*value as *const u32).cast_mut());
+    /// ```
     pub fn raw(&self) -> RawInterned<T> {
         // Safety: A reference is non-null.
         let ptr = unsafe { NonNull::new_unchecked(self.0 as *const T as *mut T) };
@@ -23,6 +35,18 @@ impl<'a, T: ?Sized> Interned<'a, T> {
     }
 
     /// Returns the type-erased raw pointer for this interned value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::Interner;
+    ///
+    /// let interner = Interner::new();
+    /// let value = interner.intern_static(42_u32);
+    /// let erased = value.erased_raw();
+    ///
+    /// assert_eq!(erased, value.raw().erase());
+    /// ```
     pub fn erased_raw(&self) -> RawInterned {
         let ptr = unsafe { NonNull::new_unchecked(self.0 as *const T as *mut T) };
         RawInterned(ptr.cast::<Prv>())
@@ -38,6 +62,18 @@ impl<'a, T: ?Sized> Interned<'a, T> {
     /// # Safety
     ///
     /// Value pointed by the given `raw` must be alive in an interner.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::{Interned, Interner};
+    ///
+    /// let interner = Interner::new();
+    /// let value = interner.intern_static(42_u32);
+    /// let restored = unsafe { Interned::from_raw(value.raw()) };
+    ///
+    /// assert_eq!(value, restored);
+    /// ```
     pub unsafe fn from_raw(raw: RawInterned<T>) -> Self {
         let ref_ = unsafe { raw.0.as_ref() };
         Self(ref_, Prv)
@@ -49,6 +85,18 @@ impl<'a, T> Interned<'a, T> {
     ///
     /// * Value pointed by the given `raw` must be alive in an interner.
     /// * Type must be correct.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::{Interned, Interner};
+    ///
+    /// let interner = Interner::new();
+    /// let value = interner.intern_static(42_u32);
+    /// let restored = unsafe { Interned::<u32>::from_erased_raw(value.erased_raw()) };
+    ///
+    /// assert_eq!(value, restored);
+    /// ```
     pub unsafe fn from_erased_raw(raw: RawInterned) -> Self {
         let ref_ = unsafe { raw.0.cast::<T>().as_ref() };
         Self(ref_, Prv)
@@ -141,12 +189,35 @@ pub struct RawInterned<T: ?Sized = Prv>(pub(crate) NonNull<T>);
 impl<T: ?Sized> RawInterned<T> {
     #[inline]
     /// Casts this raw interned pointer to another type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::Interner;
+    ///
+    /// let interner = Interner::new();
+    /// let value = interner.intern_static(42_u32);
+    /// let typed = value.erased_raw().cast::<u32>();
+    ///
+    /// assert_eq!(typed, value.raw());
+    /// ```
     pub fn cast<U>(self) -> RawInterned<U> {
         RawInterned(self.0.cast())
     }
 
-    #[inline]
     /// Erases the pointee type from this raw interned pointer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::Interner;
+    ///
+    /// let interner = Interner::new();
+    /// let value = interner.intern_static(42_u32);
+    ///
+    /// assert_eq!(value.raw().erase(), value.erased_raw());
+    /// ```
+    #[inline]
     pub fn erase(self) -> RawInterned {
         RawInterned(self.0.cast())
     }
@@ -249,6 +320,19 @@ impl<T> UnsafeLock<T> {
     /// There must be no copies of the value. See [`Send implementation`].
     ///
     /// [`Send implementation`]: UnsafeLock<T>#impl-Send-for-UnsafeLock<T>
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::UnsafeLock;
+    ///
+    /// let lock = unsafe { UnsafeLock::new(1_u32) };
+    /// let ptr = unsafe { lock.lock() };
+    /// unsafe {
+    ///     assert_eq!(*ptr.as_ref(), 1);
+    ///     lock.unlock();
+    /// }
+    /// ```
     pub unsafe fn new(value: T) -> Self {
         Self {
             inner: Arc::new(ManualMutex {
@@ -266,6 +350,25 @@ impl<T: ?Sized> UnsafeLock<T> {
     /// * Do not make copies of `T` from the returned pointer. See [`Send implementation`].
     ///
     /// [`Send implementation`]: UnsafeLock<T>#impl-Send-for-UnsafeLock<T>
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::UnsafeLock;
+    ///
+    /// let lock = unsafe { UnsafeLock::new(1_u32) };
+    /// let ptr = unsafe { lock.lock() };
+    /// unsafe {
+    ///     *ptr.as_ptr() = 2;
+    ///     lock.unlock();
+    /// }
+    ///
+    /// let ptr = unsafe { lock.lock() };
+    /// unsafe {
+    ///     assert_eq!(*ptr.as_ref(), 2);
+    ///     lock.unlock();
+    /// }
+    /// ```
     pub unsafe fn lock(&self) -> NonNull<T> {
         self.inner.mutex.lock();
         unsafe { NonNull::new_unchecked(self.inner.data.get()) }
@@ -274,6 +377,19 @@ impl<T: ?Sized> UnsafeLock<T> {
     /// # Safety
     ///
     /// Must follow [`lock`](Self::lock).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::UnsafeLock;
+    ///
+    /// let lock = unsafe { UnsafeLock::new(1_u32) };
+    /// let ptr = unsafe { lock.lock() };
+    /// unsafe {
+    ///     assert_eq!(*ptr.as_ref(), 1);
+    ///     lock.unlock();
+    /// }
+    /// ```
     pub unsafe fn unlock(&self) {
         self.inner.mutex.unlock();
     }
