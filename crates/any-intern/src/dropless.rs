@@ -64,12 +64,33 @@ use std::{
 /// ```
 pub trait Dropless {
     /// Returns pointer to the instance.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::Dropless;
+    ///
+    /// let value = 42_u32;
+    /// let ptr = value.as_byte_ptr();
+    ///
+    /// assert_eq!(ptr.as_ptr(), (&value as *const u32).cast_mut().cast::<u8>());
+    /// ```
     fn as_byte_ptr(&self) -> NonNull<u8> {
         // Safety: A reference is non-null
         unsafe { NonNull::new_unchecked(self as *const Self as *mut Self).cast::<u8>() }
     }
 
     /// Returns layout of the type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::Dropless;
+    /// use std::alloc::Layout;
+    ///
+    /// let value = 42_u32;
+    /// assert_eq!(value.layout(), Layout::new::<u32>());
+    /// ```
     fn layout(&self) -> Layout {
         Layout::for_value(self)
     }
@@ -83,6 +104,20 @@ pub trait Dropless {
     /// Undefined behavior if any conditions below are not met.
     /// * Implementation should interpret the byte slice into the type correctly.
     /// * Caller should give well aligned data for the type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::Dropless;
+    ///
+    /// let value = 42_u32;
+    /// let bytes = unsafe {
+    ///     std::slice::from_raw_parts((&value as *const u32).cast::<u8>(), std::mem::size_of::<u32>())
+    /// };
+    ///
+    /// let decoded = unsafe { u32::from_bytes(&bytes) };
+    /// assert_eq!(*decoded, 42);
+    /// ```
     unsafe fn from_bytes(bytes: &[u8]) -> &Self;
 
     /// Computes a hash value for the type using the provided byte slice.
@@ -94,6 +129,22 @@ pub trait Dropless {
     /// Undefined behavior if any conditions below are not met.
     /// * Implementation should interpret the byte slice into the type correctly.
     /// * Caller should give well aligned data for the type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::Dropless;
+    /// use std::hash::RandomState;
+    ///
+    /// let value = 42_u32;
+    /// let bytes = unsafe {
+    ///     std::slice::from_raw_parts((&value as *const u32).cast::<u8>(), std::mem::size_of::<u32>())
+    /// };
+    /// let state = RandomState::new();
+    /// let hash = unsafe { u32::hash(&state, bytes) };
+    ///
+    /// assert_eq!(hash, unsafe { u32::hash(&state, bytes) });
+    /// ```
     unsafe fn hash<S: BuildHasher>(hash_builder: &S, bytes: &[u8]) -> u64;
 
     /// Compares two byte slices for equality as instances of the type.
@@ -105,6 +156,28 @@ pub trait Dropless {
     /// Undefined behavior if any conditions below are not met.
     /// * Implementation should interpret the byte slice into the type correctly.
     /// * Caller should give well aligned data for the type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::Dropless;
+    ///
+    /// let a = 42_u32;
+    /// let b = 42_u32;
+    /// let c = 7_u32;
+    /// let a_bytes = unsafe {
+    ///     std::slice::from_raw_parts((&a as *const u32).cast::<u8>(), std::mem::size_of::<u32>())
+    /// };
+    /// let b_bytes = unsafe {
+    ///     std::slice::from_raw_parts((&b as *const u32).cast::<u8>(), std::mem::size_of::<u32>())
+    /// };
+    /// let c_bytes = unsafe {
+    ///     std::slice::from_raw_parts((&c as *const u32).cast::<u8>(), std::mem::size_of::<u32>())
+    /// };
+    ///
+    /// assert!(unsafe { <u32 as Dropless>::eq(a_bytes, b_bytes) });
+    /// assert!(!unsafe { <u32 as Dropless>::eq(a_bytes, c_bytes) });
+    /// ```
     unsafe fn eq(a: &[u8], b: &[u8]) -> bool;
 }
 
@@ -224,6 +297,15 @@ pub struct DroplessInterner<S = fxhash::FxBuildHasher> {
 
 impl DroplessInterner {
     /// Creates an empty dropless interner.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::DroplessInterner;
+    ///
+    /// let interner = DroplessInterner::new();
+    /// assert!(interner.is_empty());
+    /// ```
     pub fn new() -> Self {
         Self::default()
     }
@@ -231,6 +313,16 @@ impl DroplessInterner {
 
 impl<S: BuildHasher> DroplessInterner<S> {
     /// Creates an empty dropless interner with a custom hasher.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::DroplessInterner;
+    /// use std::hash::RandomState;
+    ///
+    /// let interner = DroplessInterner::with_hasher(RandomState::new());
+    /// assert!(interner.is_empty());
+    /// ```
     pub fn with_hasher(hash_builder: S) -> Self {
         // Safety: Only one instance exists.
         let inner = unsafe { UnsafeLock::new(DroplessInternSet::with_hasher(hash_builder)) };
@@ -238,11 +330,35 @@ impl<S: BuildHasher> DroplessInterner<S> {
     }
 
     /// Returns the number of values the interner contains.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::DroplessInterner;
+    ///
+    /// let interner = DroplessInterner::new();
+    /// assert_eq!(interner.len(), 0);
+    ///
+    /// interner.intern("hello");
+    /// assert_eq!(interner.len(), 1);
+    /// ```
     pub fn len(&self) -> usize {
         self.with_inner(|set| set.len())
     }
 
     /// Returns `true` if the interner is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::DroplessInterner;
+    ///
+    /// let interner = DroplessInterner::new();
+    /// assert!(interner.is_empty());
+    ///
+    /// interner.intern("hello");
+    /// assert!(!interner.is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.with_inner(|set| set.is_empty())
     }
@@ -339,6 +455,19 @@ impl<S: BuildHasher> DroplessInterner<S> {
     ///
     /// Although the interner supports interior mutability, `clear` requires mutable access to
     /// invalidate all [`Interned`] values referencing the interner.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::DroplessInterner;
+    ///
+    /// let mut interner = DroplessInterner::new();
+    /// interner.intern("hello");
+    /// assert!(!interner.is_empty());
+    ///
+    /// interner.clear();
+    /// assert!(interner.is_empty());
+    /// ```
     pub fn clear(&mut self) {
         self.with_inner(|set| set.clear())
     }
@@ -379,6 +508,15 @@ pub struct DroplessInternSet<S = fxhash::FxBuildHasher> {
 
 impl DroplessInternSet {
     /// Creates an empty dropless intern set.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::DroplessInternSet;
+    ///
+    /// let set = DroplessInternSet::new();
+    /// assert!(set.is_empty());
+    /// ```
     pub fn new() -> Self {
         Self::default()
     }
@@ -386,6 +524,16 @@ impl DroplessInternSet {
 
 impl<S: BuildHasher> DroplessInternSet<S> {
     /// Creates an empty dropless intern set with a custom hasher.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::DroplessInternSet;
+    /// use std::hash::RandomState;
+    ///
+    /// let set = DroplessInternSet::with_hasher(RandomState::new());
+    /// assert!(set.is_empty());
+    /// ```
     pub fn with_hasher(hash_builder: S) -> Self {
         Self {
             bump: Bump::new(),
@@ -396,6 +544,19 @@ impl<S: BuildHasher> DroplessInternSet<S> {
     }
 
     /// Stores a dropless value, returning a reference to the interned value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::DroplessInternSet;
+    ///
+    /// let mut set = DroplessInternSet::new();
+    /// let a = set.intern("hello").raw();
+    /// let b = set.intern("hello").raw();
+    ///
+    /// assert_eq!(a, b);
+    /// assert_eq!(set.len(), 1);
+    /// ```
     pub fn intern<K: Dropless + ?Sized>(&mut self, value: &K) -> Interned<'_, K> {
         let src = value.as_byte_ptr();
         let layout = value.layout();
@@ -438,6 +599,17 @@ impl<S: BuildHasher> DroplessInternSet<S> {
     }
 
     /// Stores a value formatted through [`Display`] as an interned string.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::DroplessInternSet;
+    ///
+    /// let mut set = DroplessInternSet::new();
+    /// let value = set.intern_formatted_str(&42, 2).unwrap();
+    ///
+    /// assert_eq!(&*value, "42");
+    /// ```
     pub fn intern_formatted_str<K: Display + ?Sized>(
         &mut self,
         value: &K,
@@ -519,16 +691,53 @@ impl<S: BuildHasher> DroplessInternSet<S> {
     }
 
     /// Returns the number of values in the set.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::DroplessInternSet;
+    ///
+    /// let mut set = DroplessInternSet::new();
+    /// assert_eq!(set.len(), 0);
+    ///
+    /// set.intern("hello");
+    /// assert_eq!(set.len(), 1);
+    /// ```
     pub fn len(&self) -> usize {
         self.set.len()
     }
 
     /// Returns `true` if the set is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::DroplessInternSet;
+    ///
+    /// let mut set = DroplessInternSet::new();
+    /// assert!(set.is_empty());
+    ///
+    /// set.intern("hello");
+    /// assert!(!set.is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Removes all items in the set.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::DroplessInternSet;
+    ///
+    /// let mut set = DroplessInternSet::new();
+    /// set.intern("hello");
+    /// assert!(!set.is_empty());
+    ///
+    /// set.clear();
+    /// assert!(set.is_empty());
+    /// ```
     pub fn clear(&mut self) {
         self.bump.reset();
         self.set.clear();

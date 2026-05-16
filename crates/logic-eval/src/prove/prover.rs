@@ -764,6 +764,30 @@ pub struct ProveCx<'a, T: Atom> {
 
 impl<'a, T: Atom> ProveCx<'a, T> {
     /// Returns the next proof result, if one is available.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{parse_str, ClauseDataset, Database, Expr, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let dataset: ClauseDataset<_> =
+    ///     parse_str("parent(alice, bob). parent(alice, carol).", &interner).unwrap();
+    /// let query: Expr<_> = parse_str("parent(alice, $Who)", &interner).unwrap();
+    /// let mut db = Database::new();
+    /// db.insert_dataset(dataset);
+    /// db.commit();
+    ///
+    /// let mut cx = db.query(query);
+    /// let mut answers = Vec::new();
+    /// while let Some(answer) = cx.prove_next() {
+    ///     for assignment in answer {
+    ///         answers.push(assignment.rhs().to_string());
+    ///     }
+    /// }
+    /// answers.sort_unstable();
+    /// assert_eq!(answers, vec!["bob", "carol"]);
+    /// ```
     pub fn prove_next(&mut self) -> Option<EvalView<'_, T>> {
         while let Some(node_index) = self.prover.queue.pop() {
             if let Some(proof_result) =
@@ -788,6 +812,21 @@ impl<'a, T: Atom> ProveCx<'a, T> {
     }
 
     /// Returns `true` if the query has at least one proof.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{parse_str, ClauseDataset, Database, Expr, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let dataset: ClauseDataset<_> = parse_str("sunny.", &interner).unwrap();
+    /// let query: Expr<_> = parse_str("sunny", &interner).unwrap();
+    /// let mut db = Database::new();
+    /// db.insert_dataset(dataset);
+    /// db.commit();
+    ///
+    /// assert!(db.query(query).is_true());
+    /// ```
     pub fn is_true(mut self) -> bool {
         self.prove_next().is_some()
     }
@@ -863,6 +902,24 @@ impl<'a, T: 'a> Assignment<'a, T> {
     /// Returns the left-hand-side variable name of the assignment.
     ///
     /// Note that the assignment's left-hand side is always a variable.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{parse_str, ClauseDataset, Database, Expr, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let dataset: ClauseDataset<_> = parse_str("parent(alice, bob).", &interner).unwrap();
+    /// let query: Expr<_> = parse_str("parent(alice, $Who)", &interner).unwrap();
+    /// let mut db = Database::new();
+    /// db.insert_dataset(dataset);
+    /// db.commit();
+    ///
+    /// let mut cx = db.query(query);
+    /// let assignment = cx.prove_next().unwrap().next().unwrap();
+    ///
+    /// assert_eq!(assignment.get_lhs_variable().as_ref(), "$Who");
+    /// ```
     pub fn get_lhs_variable(&self) -> &T {
         let int = self.lhs_view().find_variable().unwrap();
         self.nimap.get_name(&int).unwrap()
@@ -888,6 +945,24 @@ impl<'a, T: Atom + 'a> Assignment<'a, T> {
     /// Creates the left-hand-side term of the assignment.
     ///
     /// Creating a term may allocate memory.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{parse_str, ClauseDataset, Database, Expr, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let dataset: ClauseDataset<_> = parse_str("parent(alice, bob).", &interner).unwrap();
+    /// let query: Expr<_> = parse_str("parent(alice, $Who)", &interner).unwrap();
+    /// let mut db = Database::new();
+    /// db.insert_dataset(dataset);
+    /// db.commit();
+    ///
+    /// let mut cx = db.query(query);
+    /// let assignment = cx.prove_next().unwrap().next().unwrap();
+    ///
+    /// assert_eq!(assignment.lhs().to_string(), "$Who");
+    /// ```
     pub fn lhs(&self) -> Term<T> {
         Self::term_view_to_term(self.lhs_view(), self.nimap)
     }
@@ -895,6 +970,24 @@ impl<'a, T: Atom + 'a> Assignment<'a, T> {
     /// Creates the right-hand-side term of the assignment.
     ///
     /// Creating a term may allocate memory.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{parse_str, ClauseDataset, Database, Expr, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let dataset: ClauseDataset<_> = parse_str("parent(alice, bob).", &interner).unwrap();
+    /// let query: Expr<_> = parse_str("parent(alice, $Who)", &interner).unwrap();
+    /// let mut db = Database::new();
+    /// db.insert_dataset(dataset);
+    /// db.commit();
+    ///
+    /// let mut cx = db.query(query);
+    /// let assignment = cx.prove_next().unwrap().next().unwrap();
+    ///
+    /// assert_eq!(assignment.rhs().to_string(), "bob");
+    /// ```
     pub fn rhs(&self) -> Term<T> {
         Self::term_deep_view_to_term(self.rhs_view(), self.nimap)
     }
@@ -1185,6 +1278,23 @@ pub(crate) mod format {
     }
 
     impl<'a, T: Atom> NamedTermView<'a, T> {
+        /// Returns `true` if this view is equal to `term`.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use logic_eval::{parse_str, Clause, Database, StrInterner, Term};
+        ///
+        /// let interner = StrInterner::new();
+        /// let clause: Clause<_> = parse_str("parent(alice, bob).", &interner).unwrap();
+        /// let expected: Term<_> = parse_str("parent(alice, bob)", &interner).unwrap();
+        /// let mut db = Database::new();
+        /// db.insert_clause(clause);
+        /// db.commit();
+        ///
+        /// let term = db.terms().next().unwrap();
+        /// assert!(term.is(&expected));
+        /// ```
         pub fn is(&self, term: &Term<T>) -> bool {
             let functor = self.view.functor();
             let Some(functor) = self.nimap.get_name(functor) else {
@@ -1198,6 +1308,23 @@ pub(crate) mod format {
             self.args().zip(&term.args).all(|(l, r)| l.is(r))
         }
 
+        /// Returns `true` if this view contains `term` as itself or a nested argument.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use logic_eval::{parse_str, Clause, Database, StrInterner, Term};
+        ///
+        /// let interner = StrInterner::new();
+        /// let clause: Clause<_> = parse_str("parent(alice, bob).", &interner).unwrap();
+        /// let expected: Term<_> = parse_str("bob", &interner).unwrap();
+        /// let mut db = Database::new();
+        /// db.insert_clause(clause);
+        /// db.commit();
+        ///
+        /// let term = db.terms().next().unwrap();
+        /// assert!(term.contains(&expected));
+        /// ```
         pub fn contains(&self, term: &Term<T>) -> bool {
             if self.is(term) {
                 return true;
@@ -1338,6 +1465,23 @@ pub(crate) mod format {
     }
 
     impl<'a, T: Atom> NamedExprView<'a, T> {
+        /// Returns `true` if this expression view contains `term`.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use logic_eval::{parse_str, Clause, Database, StrInterner, Term};
+        ///
+        /// let interner = StrInterner::new();
+        /// let clause: Clause<_> = parse_str("outdoors :- sunny, warm.", &interner).unwrap();
+        /// let expected: Term<_> = parse_str("warm", &interner).unwrap();
+        /// let mut db = Database::new();
+        /// db.insert_clause(clause);
+        /// db.commit();
+        ///
+        /// let body = db.clauses().next().unwrap().body().unwrap();
+        /// assert!(body.contains_term(&expected));
+        /// ```
         pub fn contains_term(&self, term: &Term<T>) -> bool {
             match self.view.as_kind() {
                 ExprKind::Term(view) => NamedTermView {

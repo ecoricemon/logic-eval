@@ -17,22 +17,71 @@ pub struct TypedArena<T> {
 
 impl<T> TypedArena<T> {
     /// Returns the number of elements in this arena.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::TypedArena;
+    ///
+    /// let arena = TypedArena::default();
+    /// assert_eq!(arena.len(), 0);
+    ///
+    /// arena.alloc(1_u32);
+    /// assert_eq!(arena.len(), 1);
+    /// ```
     pub fn len(&self) -> usize {
         self.len.get()
     }
 
     /// Returns `true` if this arena is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::TypedArena;
+    ///
+    /// let arena = TypedArena::default();
+    /// assert!(arena.is_empty());
+    ///
+    /// arena.alloc(1_u32);
+    /// assert!(!arena.is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Allocates `value` in the arena.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::TypedArena;
+    ///
+    /// let arena = TypedArena::default();
+    /// let value = arena.alloc(String::from("hello"));
+    ///
+    /// assert_eq!(value, "hello");
+    /// assert_eq!(arena.len(), 1);
+    /// ```
     pub fn alloc(&self, value: T) -> &mut T {
         self.len.set(self.len() + 1);
         self.bump.alloc(value)
     }
 
     /// Drops all stored values and clears the arena.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use any_intern::TypedArena;
+    ///
+    /// let mut arena = TypedArena::default();
+    /// arena.alloc(1_u32);
+    /// assert!(!arena.is_empty());
+    ///
+    /// arena.clear();
+    /// assert!(arena.is_empty());
+    /// ```
     pub fn clear(&mut self) {
         self.drop_all();
         self.bump.reset();

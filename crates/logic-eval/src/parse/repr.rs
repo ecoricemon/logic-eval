@@ -40,11 +40,35 @@ pub struct Clause<T> {
 
 impl<T> Clause<T> {
     /// Creates a fact clause.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{Clause, Term};
+    ///
+    /// let clause = Clause::fact(Term::atom("sunny"));
+    ///
+    /// assert_eq!(clause.to_string(), "sunny.");
+    /// assert!(clause.body.is_none());
+    /// ```
     pub fn fact(head: Term<T>) -> Self {
         Self { head, body: None }
     }
 
     /// Creates a rule clause with a head and body.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{Clause, Expr, Term};
+    ///
+    /// let clause = Clause::rule(
+    ///     Term::atom("outdoors"),
+    ///     Expr::term(Term::atom("sunny")),
+    /// );
+    ///
+    /// assert_eq!(clause.to_string(), "outdoors :- sunny.");
+    /// ```
     pub fn rule(head: Term<T>, body: Expr<T>) -> Self {
         Self {
             head,
@@ -53,6 +77,17 @@ impl<T> Clause<T> {
     }
 
     /// Maps every atom in the clause to another type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{Clause, Term};
+    ///
+    /// let clause = Clause::fact(Term::atom("sunny"));
+    /// let mapped = clause.map(&mut |name| name.len());
+    ///
+    /// assert_eq!(mapped.head.functor, 5);
+    /// ```
     pub fn map<U, F: FnMut(T) -> U>(self, f: &mut F) -> Clause<U> {
         Clause {
             head: self.head.map(f),
@@ -61,6 +96,23 @@ impl<T> Clause<T> {
     }
 
     /// Replaces every matching term in the clause.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{Clause, Expr, Term};
+    ///
+    /// let mut clause = Clause::rule(
+    ///     Term::atom("outdoors"),
+    ///     Expr::term(Term::atom("sunny")),
+    /// );
+    ///
+    /// clause.replace_term(&mut |term| {
+    ///     (term.functor == "sunny").then(|| Term::atom("clear"))
+    /// });
+    ///
+    /// assert_eq!(clause.to_string(), "outdoors :- clear.");
+    /// ```
     pub fn replace_term<F>(&mut self, f: &mut F)
     where
         F: FnMut(&Term<T>) -> Option<Term<T>>,
@@ -132,6 +184,17 @@ pub struct Term<T> {
 
 impl<T> Term<T> {
     /// Creates an atom term with no arguments.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::Term;
+    ///
+    /// let term = Term::atom("alice");
+    ///
+    /// assert_eq!(term.to_string(), "alice");
+    /// assert!(term.args.is_empty());
+    /// ```
     pub fn atom(functor: T) -> Self {
         Term {
             functor,
@@ -140,6 +203,16 @@ impl<T> Term<T> {
     }
 
     /// Creates a compound term from a functor and arguments.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::Term;
+    ///
+    /// let term = Term::compound("parent", [Term::atom("alice"), Term::atom("bob")]);
+    ///
+    /// assert_eq!(term.to_string(), "parent(alice, bob)");
+    /// ```
     pub fn compound<I: IntoIterator<Item = Term<T>>>(functor: T, args: I) -> Self {
         Term {
             functor,
@@ -148,6 +221,18 @@ impl<T> Term<T> {
     }
 
     /// Maps every atom in the term to another type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::Term;
+    ///
+    /// let term = Term::compound("parent", [Term::atom("alice")]);
+    /// let mapped = term.map(&mut |name| name.len());
+    ///
+    /// assert_eq!(mapped.functor, 6);
+    /// assert_eq!(mapped.args[0].functor, 5);
+    /// ```
     pub fn map<U, F: FnMut(T) -> U>(self, f: &mut F) -> Term<U> {
         Term {
             functor: f(self.functor),
@@ -156,6 +241,20 @@ impl<T> Term<T> {
     }
 
     /// Replaces this term and all nested terms that match `f`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::Term;
+    ///
+    /// let mut term = Term::compound("parent", [Term::atom("alice")]);
+    /// let replaced = term.replace_all(&mut |term| {
+    ///     (term.functor == "alice").then(|| Term::atom("carol"))
+    /// });
+    ///
+    /// assert!(replaced);
+    /// assert_eq!(term.to_string(), "parent(carol)");
+    /// ```
     pub fn replace_all<F>(&mut self, f: &mut F) -> bool
     where
         F: FnMut(&Term<T>) -> Option<Term<T>>,
@@ -175,6 +274,17 @@ impl<T> Term<T> {
 
 impl<T: Clone> Term<T> {
     /// Returns this term's predicate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::Term;
+    ///
+    /// let predicate = Term::compound("parent", [Term::atom("alice")]).predicate();
+    ///
+    /// assert_eq!(predicate.functor, "parent");
+    /// assert_eq!(predicate.arity, 1);
+    /// ```
     pub fn predicate(&self) -> Predicate<T> {
         Predicate {
             functor: self.functor.clone(),
@@ -185,6 +295,17 @@ impl<T: Clone> Term<T> {
 
 impl<T: Atom> Term<T> {
     /// Returns `true` if this term is a variable.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{Name, StrInterner, Term};
+    ///
+    /// let interner = StrInterner::new();
+    /// let term = Term::atom(Name::with_intern("$X", &interner));
+    ///
+    /// assert!(term.is_variable());
+    /// ```
     pub fn is_variable(&self) -> bool {
         let is_variable = self.functor.is_variable();
 
@@ -197,6 +318,20 @@ impl<T: Atom> Term<T> {
     }
 
     /// Returns `true` if this term contains a variable.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{Name, StrInterner, Term};
+    ///
+    /// let interner = StrInterner::new();
+    /// let term = Term::compound(Name::with_intern("pair", &interner), [
+    ///     Term::atom(Name::with_intern("alice", &interner)),
+    ///     Term::atom(Name::with_intern("$X", &interner)),
+    /// ]);
+    ///
+    /// assert!(term.contains_variable());
+    /// ```
     pub fn contains_variable(&self) -> bool {
         if self.is_variable() {
             return true;
@@ -206,6 +341,18 @@ impl<T: Atom> Term<T> {
     }
 
     /// Applies `f` to every variable functor in the term.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{Name, StrInterner, Term};
+    ///
+    /// let interner = StrInterner::new();
+    /// let mut term = Term::atom(Name::with_intern("$X", &interner));
+    ///
+    /// term.replace_variables(|name| *name = Name::with_intern("$Y", &interner));
+    /// assert_eq!(term.to_string(), "$Y");
+    /// ```
     pub fn replace_variables<F: FnMut(&mut T)>(&mut self, mut f: F) {
         fn helper<T, F>(term: &mut Term<T>, f: &mut F)
         where
@@ -256,36 +403,107 @@ pub enum Expr<T> {
 
 impl<T> Expr<T> {
     /// Creates an expression from a term.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{Expr, Term};
+    ///
+    /// let expr = Expr::term(Term::atom("sunny"));
+    ///
+    /// assert_eq!(expr.to_string(), "sunny");
+    /// ```
     pub fn term(term: Term<T>) -> Self {
         Self::Term(term)
     }
 
     /// Creates an atom term expression.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::Expr;
+    ///
+    /// let expr = Expr::term_atom("sunny");
+    ///
+    /// assert_eq!(expr.to_string(), "sunny");
+    /// ```
     pub fn term_atom(functor: T) -> Self {
         Self::Term(Term::atom(functor))
     }
 
     /// Creates a compound term expression.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{Expr, Term};
+    ///
+    /// let expr = Expr::term_compound("parent", [Term::atom("alice"), Term::atom("bob")]);
+    ///
+    /// assert_eq!(expr.to_string(), "parent(alice, bob)");
+    /// ```
     pub fn term_compound<I: IntoIterator<Item = Term<T>>>(functor: T, args: I) -> Self {
         Self::Term(Term::compound(functor, args))
     }
 
     /// Creates a negated expression.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::Expr;
+    ///
+    /// let expr = Expr::expr_not(Expr::term_atom("rainy"));
+    ///
+    /// assert_eq!(expr.to_string(), "\\+ rainy");
+    /// ```
     pub fn expr_not(expr: Expr<T>) -> Self {
         Self::Not(Box::new(expr))
     }
 
     /// Creates a conjunction expression.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::Expr;
+    ///
+    /// let expr = Expr::expr_and([Expr::term_atom("sunny"), Expr::term_atom("warm")]);
+    ///
+    /// assert_eq!(expr.to_string(), "sunny, warm");
+    /// ```
     pub fn expr_and<I: IntoIterator<Item = Expr<T>>>(args: I) -> Self {
         Self::And(args.into_iter().collect())
     }
 
     /// Creates a disjunction expression.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::Expr;
+    ///
+    /// let expr = Expr::expr_or([Expr::term_atom("tea"), Expr::term_atom("coffee")]);
+    ///
+    /// assert_eq!(expr.to_string(), "tea; coffee");
+    /// ```
     pub fn expr_or<I: IntoIterator<Item = Expr<T>>>(args: I) -> Self {
         Self::Or(args.into_iter().collect())
     }
 
     /// Maps every atom in the expression to another type.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::Expr;
+    ///
+    /// let expr = Expr::expr_and([Expr::term_atom("sunny"), Expr::term_atom("warm")]);
+    /// let mapped = expr.map(&mut |name| name.len());
+    ///
+    /// assert_eq!(mapped.to_string(), "5, 4");
+    /// ```
     pub fn map<U, F: FnMut(T) -> U>(self, f: &mut F) -> Expr<U> {
         match self {
             Self::Term(term) => Expr::Term(term.map(f)),
@@ -296,6 +514,19 @@ impl<T> Expr<T> {
     }
 
     /// Replaces every matching term in the expression.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{Expr, Term};
+    ///
+    /// let mut expr = Expr::expr_and([Expr::term_atom("sunny"), Expr::term_atom("warm")]);
+    /// expr.replace_term(&mut |term| {
+    ///     (term.functor == "warm").then(|| Term::atom("dry"))
+    /// });
+    ///
+    /// assert_eq!(expr.to_string(), "sunny, dry");
+    /// ```
     pub fn replace_term<F>(&mut self, f: &mut F)
     where
         F: FnMut(&Term<T>) -> Option<Term<T>>,
@@ -316,6 +547,17 @@ impl<T> Expr<T> {
 
 impl<T: PartialEq> Expr<T> {
     /// Returns `true` if this expression contains `term`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{Expr, Term};
+    ///
+    /// let expr = Expr::expr_and([Expr::term_atom("sunny"), Expr::term_atom("warm")]);
+    ///
+    /// assert!(expr.contains_term(&Term::atom("warm")));
+    /// assert!(!expr.contains_term(&Term::atom("rainy")));
+    /// ```
     pub fn contains_term(&self, term: &Term<T>) -> bool {
         match self {
             Self::Term(t) => t == term,
@@ -325,6 +567,19 @@ impl<T: PartialEq> Expr<T> {
     }
 
     /// e.g. ¬(A ∧ (B ∨ C)) -> ¬A ∨ (¬B ∧ ¬C)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::Expr;
+    ///
+    /// let expr = Expr::expr_not(Expr::expr_and([
+    ///     Expr::term_atom("a"),
+    ///     Expr::term_atom("b"),
+    /// ]));
+    ///
+    /// assert_eq!(expr.distribute_not().to_string(), "\\+ a; \\+ b");
+    /// ```
     pub fn distribute_not(self) -> Self {
         match self {
             Self::Term(term) => Self::Term(term),

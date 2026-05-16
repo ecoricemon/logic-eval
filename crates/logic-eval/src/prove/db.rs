@@ -49,6 +49,17 @@ pub struct Database<T> {
 
 impl<T: Atom> Database<T> {
     /// Creates an empty database.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{Database, InternedStr, Name};
+    ///
+    /// type Db<'a> = Database<Name<InternedStr<'a>>>;
+    ///
+    /// let db: Db<'_> = Database::new();
+    /// assert_eq!(db.clauses().count(), 0);
+    /// ```
     pub fn new() -> Self {
         Self {
             clauses: IndexMap::default(),
@@ -62,6 +73,21 @@ impl<T: Atom> Database<T> {
     }
 
     /// Iterates over all terms stored in the database.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{parse_str, Clause, Database, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let clause: Clause<_> = parse_str("sunny.", &interner).unwrap();
+    /// let mut db = Database::new();
+    /// db.insert_clause(clause);
+    /// db.commit();
+    ///
+    /// let terms = db.terms().map(|term| term.to_string()).collect::<Vec<_>>();
+    /// assert_eq!(terms, vec!["sunny"]);
+    /// ```
     pub fn terms(&self) -> NamedTermViewIter<'_, T> {
         NamedTermViewIter {
             term_iter: self.stor.terms.terms(),
@@ -70,6 +96,21 @@ impl<T: Atom> Database<T> {
     }
 
     /// Iterates over all clauses stored in the database.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{parse_str, Clause, Database, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let clause: Clause<_> = parse_str("sunny.", &interner).unwrap();
+    /// let mut db = Database::new();
+    /// db.insert_clause(clause);
+    /// db.commit();
+    ///
+    /// let clauses = db.clauses().map(|clause| clause.to_string()).collect::<Vec<_>>();
+    /// assert_eq!(clauses, vec!["sunny."]);
+    /// ```
     pub fn clauses(&self) -> ClauseIter<'_, T> {
         ClauseIter {
             clauses: &self.clauses,
@@ -81,6 +122,21 @@ impl<T: Atom> Database<T> {
     }
 
     /// Inserts every clause from `dataset`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{parse_str, ClauseDataset, Database, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let dataset: ClauseDataset<_> = parse_str("sunny.\nwarm.", &interner).unwrap();
+    /// let mut db = Database::new();
+    ///
+    /// db.insert_dataset(dataset);
+    /// db.commit();
+    ///
+    /// assert_eq!(db.clauses().count(), 2);
+    /// ```
     pub fn insert_dataset(&mut self, dataset: ClauseDataset<T>) {
         for clause in dataset {
             self.insert_clause(clause);
@@ -88,6 +144,22 @@ impl<T: Atom> Database<T> {
     }
 
     /// Inserts the given clause into the database.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{parse_str, Clause, Database, Expr, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let clause: Clause<_> = parse_str("sunny.", &interner).unwrap();
+    /// let query: Expr<_> = parse_str("sunny", &interner).unwrap();
+    /// let mut db = Database::new();
+    ///
+    /// db.insert_clause(clause);
+    /// db.commit();
+    ///
+    /// assert!(db.query(query).is_true());
+    /// ```
     pub fn insert_clause(&mut self, clause: Clause<T>) {
         // Saves current state. We will revert DB when the change is not committed.
         if self.revert_point.is_none() {
@@ -123,6 +195,25 @@ impl<T: Atom> Database<T> {
     }
 
     /// Starts a query against the committed database.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{parse_str, ClauseDataset, Database, Expr, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let dataset: ClauseDataset<_> = parse_str("parent(alice, bob).", &interner).unwrap();
+    /// let query: Expr<_> = parse_str("parent(alice, $Who)", &interner).unwrap();
+    /// let mut db = Database::new();
+    /// db.insert_dataset(dataset);
+    /// db.commit();
+    ///
+    /// let mut cx = db.query(query);
+    /// let answer = cx.prove_next().unwrap().next().unwrap();
+    ///
+    /// assert_eq!(answer.get_lhs_variable().as_ref(), "$Who");
+    /// assert_eq!(answer.rhs().to_string(), "bob");
+    /// ```
     pub fn query(&mut self, expr: Expr<T>) -> ProveCx<'_, T> {
         // Discards uncommitted changes.
         if let Some(revert_point) = self.revert_point.take() {
@@ -139,6 +230,22 @@ impl<T: Atom> Database<T> {
     }
 
     /// Commits pending clause insertions.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{parse_str, Clause, Database, Expr, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let clause: Clause<_> = parse_str("sunny.", &interner).unwrap();
+    /// let query: Expr<_> = parse_str("sunny", &interner).unwrap();
+    /// let mut db = Database::new();
+    ///
+    /// db.insert_clause(clause);
+    /// db.commit();
+    ///
+    /// assert!(db.query(query).is_true());
+    /// ```
     pub fn commit(&mut self) {
         self.revert_point.take();
     }
@@ -147,6 +254,21 @@ impl<T: Atom> Database<T> {
     ///
     /// Requires T to implement [`AsRef<str>`] so that functor names can be serialized into Prolog
     /// syntax.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{parse_str, ClauseDataset, Database, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let dataset: ClauseDataset<_> = parse_str("parent(Alice, Bob).", &interner).unwrap();
+    /// let mut db = Database::new();
+    /// db.insert_dataset(dataset);
+    /// db.commit();
+    ///
+    /// let prolog = db.to_prolog(|name| name);
+    /// assert_eq!(prolog, "parent(alice, bob).\n");
+    /// ```
     pub fn to_prolog<F: FnMut(&str) -> &str>(&self, sanitize: F) -> String
     where
         T: AsRef<str>,
@@ -515,12 +637,42 @@ pub struct ClauseRef<'a, T> {
 
 impl<'a, T: Atom> ClauseRef<'a, T> {
     /// Returns the clause head.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{parse_str, Clause, Database, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let clause: Clause<_> = parse_str("outdoors :- sunny.", &interner).unwrap();
+    /// let mut db = Database::new();
+    /// db.insert_clause(clause);
+    /// db.commit();
+    ///
+    /// let clause = db.clauses().next().unwrap();
+    /// assert_eq!(clause.head().to_string(), "outdoors");
+    /// ```
     pub fn head(&self) -> NamedTermView<'a, T> {
         let head = self.stor.get_term(self.id.head);
         NamedTermView::new(head, self.nimap)
     }
 
     /// Returns the clause body, if this clause is a rule.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{parse_str, Clause, Database, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let clause: Clause<_> = parse_str("outdoors :- sunny.", &interner).unwrap();
+    /// let mut db = Database::new();
+    /// db.insert_clause(clause);
+    /// db.commit();
+    ///
+    /// let clause = db.clauses().next().unwrap();
+    /// assert_eq!(clause.body().unwrap().to_string(), "sunny");
+    /// ```
     pub fn body(&self) -> Option<NamedExprView<'a, T>> {
         self.id.body.map(|id| {
             let body = self.stor.get_expr(id);

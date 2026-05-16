@@ -21,6 +21,15 @@ pub struct UniqueContainer<T> {
 
 impl<T> UniqueContainer<T> {
     /// Creates an empty container.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval_util::unique::UniqueContainer;
+    ///
+    /// let container = UniqueContainer::<u32>::new();
+    /// assert!(container.is_empty());
+    /// ```
     pub fn new() -> Self {
         Self {
             values: Values::new(),
@@ -29,31 +38,107 @@ impl<T> UniqueContainer<T> {
     }
 
     /// Returns the number of indices in the container.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval_util::unique::UniqueContainer;
+    ///
+    /// let mut container = UniqueContainer::new();
+    /// assert_eq!(container.len(), 0);
+    ///
+    /// container.insert("a");
+    /// container.insert("a");
+    /// assert_eq!(container.len(), 1);
+    /// ```
     pub fn len(&self) -> usize {
         self.values.len()
     }
 
     /// Returns `true` if the container is empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval_util::unique::UniqueContainer;
+    ///
+    /// let mut container = UniqueContainer::new();
+    /// assert!(container.is_empty());
+    ///
+    /// container.insert("a");
+    /// assert!(!container.is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Returns the value at `index`, following indirect entries.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval_util::unique::UniqueContainer;
+    ///
+    /// let mut container = UniqueContainer::new();
+    /// let index = container.insert("a");
+    ///
+    /// assert_eq!(container.get(index), Some(&"a"));
+    /// assert_eq!(container.get(99), None);
+    /// ```
     pub fn get(&self, index: usize) -> Option<&T> {
         self.values.get(index)
     }
 
     /// Iterates over `(index, value)` pairs for real data entries.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval_util::unique::UniqueContainer;
+    ///
+    /// let mut container = UniqueContainer::new();
+    /// container.insert("a");
+    /// container.insert("b");
+    ///
+    /// let pairs = container.iter().collect::<Vec<_>>();
+    /// assert_eq!(pairs, vec![(0, &"a"), (1, &"b")]);
+    /// ```
     pub fn iter(&self) -> PairIter<'_, T> {
         self.values.iter()
     }
 
     /// Iterates over unique values.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval_util::unique::UniqueContainer;
+    ///
+    /// let mut container = UniqueContainer::new();
+    /// container.insert("a");
+    /// container.insert("b");
+    ///
+    /// let values = container.values().copied().collect::<Vec<_>>();
+    /// assert_eq!(values, vec!["a", "b"]);
+    /// ```
     pub fn values(&self) -> ValueIter<'_, T> {
         self.values.values()
     }
 
     /// All indices will be invalidated.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval_util::unique::UniqueContainer;
+    ///
+    /// let mut container = UniqueContainer::new();
+    /// container.insert("a");
+    /// assert!(!container.is_empty());
+    ///
+    /// container.clear();
+    /// assert!(container.is_empty());
+    /// ```
     pub fn clear(&mut self) {
         self.values.clear();
         self.map.clear();
@@ -67,6 +152,20 @@ where
     /// Shortens the container to the given length.
     ///
     /// All indices beyond the length will be invalidated.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval_util::unique::UniqueContainer;
+    ///
+    /// let mut container = UniqueContainer::new();
+    /// container.insert(1);
+    /// container.insert(2);
+    ///
+    /// container.truncate(1);
+    /// assert_eq!(container.len(), 1);
+    /// assert_eq!(container.find(&2), None);
+    /// ```
     pub fn truncate(&mut self, len: usize) {
         for index in len..self.values.len() {
             let hash = Self::hash(&self.values[index]);
@@ -79,6 +178,19 @@ where
     ///
     /// If the same value was found by [`PartialEq`], then the old value is replaced with the given
     /// new value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval_util::unique::UniqueContainer;
+    ///
+    /// let mut container = UniqueContainer::new();
+    /// let first = container.insert("a");
+    /// let second = container.insert("a");
+    ///
+    /// assert_eq!(first, second);
+    /// assert_eq!(container.len(), 1);
+    /// ```
     pub fn insert(&mut self, value: T) -> usize {
         let hash = Self::hash(&value);
         if let Some(index) = self._find(hash, &value) {
@@ -94,15 +206,21 @@ where
         index
     }
 
-    /// Returns the existing index for `value`, or the next insertion index.
-    pub fn next_index<Q>(&mut self, value: &Q) -> usize
-    where
-        Q: Hash + PartialEq<T> + ?Sized,
-    {
-        self.find(value).unwrap_or(self.values.len())
-    }
-
     /// Replaces `old` with `new`, returning whether `old` was found.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval_util::unique::UniqueContainer;
+    ///
+    /// let mut container = UniqueContainer::new();
+    /// container.insert(1);
+    ///
+    /// assert!(container.replace(&1, 2));
+    /// assert_eq!(container.find(&1), None);
+    /// assert_eq!(container.find(&2), Some(0));
+    /// assert!(!container.replace(&99, 3));
+    /// ```
     pub fn replace<Q>(&mut self, old: &Q, new: T) -> bool
     where
         Q: Hash + PartialEq<T> + ?Sized,
@@ -151,6 +269,18 @@ where
     }
 
     /// Finds the index of `value`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval_util::unique::UniqueContainer;
+    ///
+    /// let mut container = UniqueContainer::new();
+    /// let index = container.insert(1);
+    ///
+    /// assert_eq!(container.find(&1), Some(index));
+    /// assert_eq!(container.find(&2), None);
+    /// ```
     pub fn find<Q>(&self, value: &Q) -> Option<usize>
     where
         Q: Hash + PartialEq<T> + ?Sized,

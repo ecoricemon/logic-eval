@@ -9,9 +9,31 @@ pub trait Intern {
         Self: 'a;
 
     /// Interns a string slice.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{Intern, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let name = interner.intern_str("sunny");
+    ///
+    /// assert_eq!(&*name, "sunny");
+    /// ```
     fn intern_str(&self, s: &str) -> Self::Interned<'_>;
 
     /// Formats a value into an interned string using at most `upper_size` bytes.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{Intern, StrInterner};
+    ///
+    /// let interner = StrInterner::new();
+    /// let name = interner.intern_formatted_str(&42, 2).unwrap();
+    ///
+    /// assert_eq!(&*name, "42");
+    /// ```
     fn intern_formatted_str<T: Display + ?Sized>(
         &self,
         value: &T,

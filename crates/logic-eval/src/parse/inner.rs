@@ -1,6 +1,17 @@
 use crate::{Error, Intern, Result};
 
 /// Parses `text` as `T` using the provided interner.
+///
+/// # Examples
+///
+/// ```
+/// use logic_eval::{parse_str, Clause, StrInterner};
+///
+/// let interner = StrInterner::new();
+/// let clause: Clause<_> = parse_str("parent(alice, bob).", &interner).unwrap();
+///
+/// assert_eq!(clause.to_string(), "parent(alice, bob).");
+/// ```
 pub fn parse_str<'int, Int, T>(text: &str, interner: &'int Int) -> Result<T>
 where
     Int: Intern,
@@ -28,7 +39,7 @@ pub struct ParseBuffer<'a> {
 
 impl<'a> ParseBuffer<'a> {
     /// Creates a buffer that spans the whole input string.
-    pub const fn new(text: &'a str) -> Self {
+    pub(crate) const fn new(text: &'a str) -> Self {
         Self {
             text,
             start: 0,
