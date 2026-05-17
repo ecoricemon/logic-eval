@@ -16,6 +16,13 @@ indexmap = { workspace = true }
 fxhash = { workspace = true }
 smallvec = { workspace = true }
 
+[dev-dependencies]
+criterion = "0.4"
+
+[[bench]]
+name = "query_threads"
+harness = false
+
 [[example]]
 name = "meal_recommendation"
 path = "examples/meal_recommendation.rs"

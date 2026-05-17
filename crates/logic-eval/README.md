@@ -47,7 +47,7 @@ Replace `src/main.rs` with:
 use logic_eval::{parse_str, Database, StrInterner};
 
 fn main() {
-    let mut db = Database::new();
+    let mut db = Database::default();
     let interner = StrInterner::new();
 
     let pantry = r#"
@@ -61,7 +61,6 @@ fn main() {
     "#;
 
     db.insert_dataset(parse_str(pantry, &interner).unwrap());
-    db.commit();
 
     let query = parse_str("can_make($Meal).", &interner).unwrap();
     let mut results = db.query(query);

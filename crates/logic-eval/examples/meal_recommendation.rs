@@ -6,7 +6,7 @@
 use logic_eval::{parse_str, Database, StrInterner};
 
 fn main() {
-    let mut db = Database::new();
+    let mut db = Database::default();
     let interner = StrInterner::new();
 
     // Facts describe what is true. Rules describe what can be inferred.
@@ -22,7 +22,6 @@ fn main() {
 
     // Load the facts and rules into the database before asking questions.
     db.insert_dataset(parse_str(pantry, &interner).unwrap());
-    db.commit();
 
     // $Meal is a variable. logic-eval will find every value that works.
     let query = parse_str("can_make($Meal).", &interner).unwrap();

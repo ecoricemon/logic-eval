@@ -2,7 +2,7 @@ use super::{
     canonical,
     repr::{
         ApplyResult, ClauseId, ExprId, ExprKind, ExprView, TermDeepView, TermElem, TermId,
-        TermStorage, TermStorageLen, TermView, TermViewMut, UniqueTermArray,
+        TermStorage, TermView, TermViewMut, UniqueTermArray,
     },
     table::Table,
 };
@@ -55,6 +55,12 @@ pub(crate) struct Prover {
 
     /// SLG resolution.
     table: Table,
+
+    /// Database clauses imported into query-local storage.
+    ///
+    /// The cached clause is a per-query template. Each proof use still clones this template before
+    /// variable freshening, so repeated use of a database rule does not re-import from `db_stor`.
+    imported_clause_templates: Map<ClauseId, ClauseId>,
 }
 
 impl Prover {
@@ -70,6 +76,7 @@ impl Prover {
             temp_var_buf: Map::default(),
             temp_var_int: 0,
             table: Table::default(),
+            imported_clause_templates: Map::default(),
         }
     }
 
@@ -81,43 +88,18 @@ impl Prover {
         self.query_answers.clear();
         self.queue.clear();
         self.table.clear();
+        self.imported_clause_templates.clear();
     }
 
     pub(crate) fn prove<'a, T: Atom>(
-        &'a mut self,
+        self,
         query: Expr<T>,
         clauses: &'a IndexMap<Predicate<Integer>, Vec<ClauseId>>,
         table_clauses: &'a IndexSet<Predicate<Integer>>,
-        stor: &'a mut TermStorage<Integer>,
-        nimap: &'a mut NameIntMap<T>,
+        db_stor: &'a TermStorage<Integer>,
+        db_nimap: &'a NameIntMap<T>,
     ) -> ProveCx<'a, T> {
-        self.clear();
-
-        let old_nimap_state = nimap.state();
-        let query = query.map(&mut |name| nimap.name_to_int(name));
-
-        let old_stor_len = stor.len();
-        self.query = stor.insert_expr(query);
-
-        stor.get_expr(self.query)
-            .with_term(&mut |term: TermView<'_, Integer>| {
-                term.with_variable(|term| self.query_vars.push(term.id));
-            });
-
-        let node_kind = NodeKind::Expr(self.query);
-        let node_parent = self.nodes.len();
-        self.nodes.push(Node::new(node_kind, node_parent));
-        self.queue.push(0);
-
-        ProveCx {
-            prover: self,
-            clauses,
-            table_clauses,
-            stor,
-            nimap,
-            old_stor_len,
-            old_nimap_state,
-        }
+        ProveCx::new(self, query, clauses, table_clauses, db_stor, db_nimap)
     }
 
     /// Evaluates the given node against matching clauses or table answers, then returns whether a
@@ -130,6 +112,7 @@ impl Prover {
         node_index: usize,
         clauses: &IndexMap<Predicate<Integer>, Vec<ClauseId>>,
         table_clauses: &IndexSet<Predicate<Integer>>,
+        db_stor: &TermStorage<Integer>,
         stor: &mut TermStorage<Integer>,
     ) -> Option<bool> {
         let node_expr = match self.nodes[node_index].kind {
@@ -147,8 +130,7 @@ impl Prover {
 
         let node_leftmost = stor.get_expr(node_expr).leftmost_term().id;
         let node_leftmost_pred = stor.get_term(node_leftmost).predicate();
-        let mut similar_clauses = &[][..];
-        let mut clause_buf: SmallVec<[ClauseId; 1]> = SmallVec::new();
+        let mut similar_clauses: SmallVec<[ClauseId; 2]> = SmallVec::new();
 
         // === SLG path ===
         // * Table entry - Created from non-canonical leftmost term of the node. In tabling,
@@ -174,11 +156,10 @@ impl Prover {
                 for (var, answer) in vars.into_iter().zip(answers) {
                     term.replace(var, *answer);
                 }
-                clause_buf.push(ClauseId {
+                similar_clauses.push(ClauseId {
                     head: term.id(),
                     body: None,
                 });
-                similar_clauses = &clause_buf[..];
 
                 // More answers? We'll handle them next time.
                 if !entry.answers(next_offset).is_empty() {
@@ -197,7 +178,17 @@ impl Prover {
 
         if similar_clauses.is_empty() {
             if let Some(v) = clauses.get(&node_leftmost_pred) {
-                similar_clauses = v.as_slice()
+                for &clause in v {
+                    let template =
+                        if let Some(&template) = self.imported_clause_templates.get(&clause) {
+                            template
+                        } else {
+                            let template = stor.import_clause(db_stor, clause);
+                            self.imported_clause_templates.insert(clause, template);
+                            template
+                        };
+                    similar_clauses.push(template);
+                }
             }
         }
 
@@ -211,7 +202,7 @@ impl Prover {
             }
 
             let clause = Self::convert_var_into_temp(
-                *clause,
+                clause,
                 stor,
                 &mut self.temp_var_buf,
                 &mut self.temp_var_int,
@@ -223,9 +214,9 @@ impl Prover {
         }
 
         // We may need to apply true or false to the leftmost term of the node expression due to
-        // unification failure or exhaustive search.
+        // unification failure or for the exhaustive search.
         // - Unification failure means the leftmost term should be false.
-        // - But we need to consider exhaustive search at the same time.
+        // - But we need to consider the exhaustive search at the same time.
 
         let expr = stor.get_expr(node_expr);
         let eval = self.nodes.len() > old_len;
@@ -753,16 +744,51 @@ enum UnifyOp {
 
 /// Proof-search context for a query.
 pub struct ProveCx<'a, T: Atom> {
-    prover: &'a mut Prover,
+    prover: Prover,
     clauses: &'a IndexMap<Predicate<Integer>, Vec<ClauseId>>,
     table_clauses: &'a IndexSet<Predicate<Integer>>,
-    stor: &'a mut TermStorage<Integer>,
-    nimap: &'a mut NameIntMap<T>,
-    old_stor_len: TermStorageLen,
-    old_nimap_state: NameIntMapState,
+    db_stor: &'a TermStorage<Integer>,
+    stor: TermStorage<Integer>,
+    nimap: QueryNameIntMap<'a, T>,
 }
 
 impl<'a, T: Atom> ProveCx<'a, T> {
+    fn new(
+        mut prover: Prover,
+        query: Expr<T>,
+        clauses: &'a IndexMap<Predicate<Integer>, Vec<ClauseId>>,
+        table_clauses: &'a IndexSet<Predicate<Integer>>,
+        db_stor: &'a TermStorage<Integer>,
+        db_nimap: &'a NameIntMap<T>,
+    ) -> Self {
+        prover.clear();
+
+        let mut nimap = QueryNameIntMap::new(db_nimap);
+        let query = query.map(&mut |name| nimap.name_to_int(name));
+
+        let mut stor = TermStorage::default();
+        prover.query = stor.insert_expr(query);
+
+        stor.get_expr(prover.query)
+            .with_term(&mut |term: TermView<'_, Integer>| {
+                term.with_variable(|term| prover.query_vars.push(term.id));
+            });
+
+        let node_kind = NodeKind::Expr(prover.query);
+        let node_parent = prover.nodes.len();
+        prover.nodes.push(Node::new(node_kind, node_parent));
+        prover.queue.push(0);
+
+        Self {
+            prover,
+            clauses,
+            table_clauses,
+            db_stor,
+            stor,
+            nimap,
+        }
+    }
+
     /// Returns the next proof result, if one is available.
     ///
     /// # Examples
@@ -774,9 +800,8 @@ impl<'a, T: Atom> ProveCx<'a, T> {
     /// let dataset: ClauseDataset<_> =
     ///     parse_str("parent(alice, bob). parent(alice, carol).", &interner).unwrap();
     /// let query: Expr<_> = parse_str("parent(alice, $Who)", &interner).unwrap();
-    /// let mut db = Database::new();
+    /// let mut db = Database::default();
     /// db.insert_dataset(dataset);
-    /// db.commit();
     ///
     /// let mut cx = db.query(query);
     /// let mut answers = Vec::new();
@@ -790,18 +815,21 @@ impl<'a, T: Atom> ProveCx<'a, T> {
     /// ```
     pub fn prove_next(&mut self) -> Option<EvalView<'_, T>> {
         while let Some(node_index) = self.prover.queue.pop() {
-            if let Some(proof_result) =
-                self.prover
-                    .evaluate_node(node_index, self.clauses, self.table_clauses, self.stor)
-            {
+            if let Some(proof_result) = self.prover.evaluate_node(
+                node_index,
+                self.clauses,
+                self.table_clauses,
+                self.db_stor,
+                &mut self.stor,
+            ) {
                 // Return Some(EvalView) only if the result is TRUE and yielded a new ground
                 // query answer.
-                if proof_result && self.prover.record_query_answer(self.stor) {
+                if proof_result && self.prover.record_query_answer(&mut self.stor) {
                     return Some(EvalView {
                         query_vars: &self.prover.query_vars,
                         terms: &self.stor.terms.buf,
                         term_assigns: &self.prover.term_assigns,
-                        nimap: self.nimap,
+                        nimap: &self.nimap,
                         start: 0,
                         end: self.prover.query_vars.len(),
                     });
@@ -821,9 +849,8 @@ impl<'a, T: Atom> ProveCx<'a, T> {
     /// let interner = StrInterner::new();
     /// let dataset: ClauseDataset<_> = parse_str("sunny.", &interner).unwrap();
     /// let query: Expr<_> = parse_str("sunny", &interner).unwrap();
-    /// let mut db = Database::new();
+    /// let mut db = Database::default();
     /// db.insert_dataset(dataset);
-    /// db.commit();
     ///
     /// assert!(db.query(query).is_true());
     /// ```
@@ -832,10 +859,38 @@ impl<'a, T: Atom> ProveCx<'a, T> {
     }
 }
 
-impl<T: Atom> Drop for ProveCx<'_, T> {
-    fn drop(&mut self) {
-        self.stor.truncate(self.old_stor_len.clone());
-        self.nimap.revert(self.old_nimap_state.clone());
+/// Name mapping for a query: database names are borrowed, query-only names are local.
+struct QueryNameIntMap<'a, T> {
+    database: &'a NameIntMap<T>,
+    local: NameIntMap<T>,
+}
+
+impl<'a, T> QueryNameIntMap<'a, T> {
+    fn new(database: &'a NameIntMap<T>) -> Self {
+        Self {
+            database,
+            local: NameIntMap {
+                name2int: IndexMap::default(),
+                int2name: IndexMap::default(),
+                next_int: database.next_int,
+            },
+        }
+    }
+
+    fn get_name(&self, int: &Integer) -> Option<&T> {
+        self.database
+            .get_name(int)
+            .or_else(|| self.local.get_name(int))
+    }
+}
+
+impl<T: Atom> QueryNameIntMap<'_, T> {
+    fn name_to_int(&mut self, name: T) -> Integer {
+        if let Some(int) = self.database.name2int.get(&name) {
+            *int
+        } else {
+            self.local.name_to_int(name)
+        }
     }
 }
 
@@ -844,7 +899,7 @@ pub struct EvalView<'a, T> {
     query_vars: &'a [TermId],
     terms: &'a [TermElem<Integer>],
     term_assigns: &'a TermAssignments,
-    nimap: &'a NameIntMap<T>,
+    nimap: &'a QueryNameIntMap<'a, T>,
     /// Inclusive
     start: usize,
     /// Exclusive
@@ -895,7 +950,7 @@ pub struct Assignment<'a, T> {
     buf: &'a [TermElem<Integer>],
     from: TermId,
     term_assigns: &'a TermAssignments,
-    nimap: &'a NameIntMap<T>,
+    nimap: &'a QueryNameIntMap<'a, T>,
 }
 
 impl<'a, T: 'a> Assignment<'a, T> {
@@ -911,9 +966,8 @@ impl<'a, T: 'a> Assignment<'a, T> {
     /// let interner = StrInterner::new();
     /// let dataset: ClauseDataset<_> = parse_str("parent(alice, bob).", &interner).unwrap();
     /// let query: Expr<_> = parse_str("parent(alice, $Who)", &interner).unwrap();
-    /// let mut db = Database::new();
+    /// let mut db = Database::default();
     /// db.insert_dataset(dataset);
-    /// db.commit();
     ///
     /// let mut cx = db.query(query);
     /// let assignment = cx.prove_next().unwrap().next().unwrap();
@@ -954,9 +1008,8 @@ impl<'a, T: Atom + 'a> Assignment<'a, T> {
     /// let interner = StrInterner::new();
     /// let dataset: ClauseDataset<_> = parse_str("parent(alice, bob).", &interner).unwrap();
     /// let query: Expr<_> = parse_str("parent(alice, $Who)", &interner).unwrap();
-    /// let mut db = Database::new();
+    /// let mut db = Database::default();
     /// db.insert_dataset(dataset);
-    /// db.commit();
     ///
     /// let mut cx = db.query(query);
     /// let assignment = cx.prove_next().unwrap().next().unwrap();
@@ -979,9 +1032,8 @@ impl<'a, T: Atom + 'a> Assignment<'a, T> {
     /// let interner = StrInterner::new();
     /// let dataset: ClauseDataset<_> = parse_str("parent(alice, bob).", &interner).unwrap();
     /// let query: Expr<_> = parse_str("parent(alice, $Who)", &interner).unwrap();
-    /// let mut db = Database::new();
+    /// let mut db = Database::default();
     /// db.insert_dataset(dataset);
-    /// db.commit();
     ///
     /// let mut cx = db.query(query);
     /// let assignment = cx.prove_next().unwrap().next().unwrap();
@@ -992,7 +1044,7 @@ impl<'a, T: Atom + 'a> Assignment<'a, T> {
         Self::term_deep_view_to_term(self.rhs_view(), self.nimap)
     }
 
-    fn term_view_to_term(view: TermView<'_, Integer>, nimap: &NameIntMap<T>) -> Term<T> {
+    fn term_view_to_term(view: TermView<'_, Integer>, nimap: &QueryNameIntMap<'_, T>) -> Term<T> {
         let functor = view.functor();
         let args = view.args();
 
@@ -1010,7 +1062,10 @@ impl<'a, T: Atom + 'a> Assignment<'a, T> {
         Term { functor, args }
     }
 
-    fn term_deep_view_to_term(view: TermDeepView<'_, Integer>, nimap: &NameIntMap<T>) -> Term<T> {
+    fn term_deep_view_to_term(
+        view: TermDeepView<'_, Integer>,
+        nimap: &QueryNameIntMap<'_, T>,
+    ) -> Term<T> {
         let functor = view.functor();
         let args = view.args();
 
@@ -1031,24 +1086,19 @@ impl<'a, T: Atom + 'a> Assignment<'a, T> {
 
 impl<T: Atom + Display> Display for Assignment<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let view = format::NamedTermView::new(self.lhs_view(), self.nimap);
-        Display::fmt(&view, f)?;
+        Display::fmt(&self.lhs(), f)?;
 
         f.write_str(" = ")?;
 
-        let view = format::NamedTermDeepView::new(self.rhs_view(), self.nimap);
-        Display::fmt(&view, f)
+        Display::fmt(&self.rhs(), f)
     }
 }
 
 impl<T: Atom + Debug> Debug for Assignment<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let lhs = format::NamedTermView::new(self.lhs_view(), self.nimap);
-        let rhs = format::NamedTermDeepView::new(self.rhs_view(), self.nimap);
-
         f.debug_struct("Assignment")
-            .field("lhs", &lhs)
-            .field("rhs", &rhs)
+            .field("lhs", &self.lhs())
+            .field("rhs", &self.rhs())
             .finish()
     }
 }
@@ -1199,37 +1249,8 @@ pub(crate) struct NameIntMap<T> {
 }
 
 impl<T> NameIntMap<T> {
-    pub(crate) fn new() -> Self {
-        Self {
-            name2int: IndexMap::default(),
-            int2name: IndexMap::default(),
-            next_int: 0,
-        }
-    }
-
     pub(crate) fn get_name(&self, int: &Integer) -> Option<&T> {
         self.int2name.get(int)
-    }
-
-    pub(crate) fn state(&self) -> NameIntMapState {
-        NameIntMapState {
-            name2int_len: self.name2int.len(),
-            int2name_len: self.int2name.len(),
-            next_int: self.next_int,
-        }
-    }
-
-    pub(crate) fn revert(
-        &mut self,
-        NameIntMapState {
-            name2int_len,
-            int2name_len,
-            next_int,
-        }: NameIntMapState,
-    ) {
-        self.name2int.truncate(name2int_len);
-        self.int2name.truncate(int2name_len);
-        self.next_int = next_int;
     }
 }
 
@@ -1249,11 +1270,14 @@ impl<T: Atom> NameIntMap<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NameIntMapState {
-    name2int_len: usize,
-    int2name_len: usize,
-    next_int: u32,
+impl<T> Default for NameIntMap<T> {
+    fn default() -> Self {
+        Self {
+            name2int: IndexMap::default(),
+            int2name: IndexMap::default(),
+            next_int: 0,
+        }
+    }
 }
 
 pub(crate) mod format {
@@ -1288,9 +1312,8 @@ pub(crate) mod format {
         /// let interner = StrInterner::new();
         /// let clause: Clause<_> = parse_str("parent(alice, bob).", &interner).unwrap();
         /// let expected: Term<_> = parse_str("parent(alice, bob)", &interner).unwrap();
-        /// let mut db = Database::new();
+        /// let mut db = Database::default();
         /// db.insert_clause(clause);
-        /// db.commit();
         ///
         /// let term = db.terms().next().unwrap();
         /// assert!(term.is(&expected));
@@ -1318,9 +1341,8 @@ pub(crate) mod format {
         /// let interner = StrInterner::new();
         /// let clause: Clause<_> = parse_str("parent(alice, bob).", &interner).unwrap();
         /// let expected: Term<_> = parse_str("bob", &interner).unwrap();
-        /// let mut db = Database::new();
+        /// let mut db = Database::default();
         /// db.insert_clause(clause);
-        /// db.commit();
         ///
         /// let term = db.terms().next().unwrap();
         /// assert!(term.contains(&expected));
@@ -1388,71 +1410,6 @@ pub(crate) mod format {
         }
     }
 
-    pub(crate) struct NamedTermDeepView<'a, T> {
-        view: TermDeepView<'a, Integer>,
-        nimap: &'a NameIntMap<T>,
-    }
-
-    impl<'a, T> NamedTermDeepView<'a, T> {
-        pub(crate) const fn new(view: TermDeepView<'a, Integer>, nimap: &'a NameIntMap<T>) -> Self {
-            Self { view, nimap }
-        }
-    }
-
-    impl<'a, T: Display> Display for NamedTermDeepView<'a, T> {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let Self { view, nimap } = self;
-
-            let functor = view.functor();
-            let args = view.args();
-            let num_args = args.len();
-
-            write_int(functor, nimap, f)?;
-
-            if num_args > 0 {
-                f.write_char('(')?;
-                for (i, arg) in args.enumerate() {
-                    fmt::Display::fmt(&Self::new(arg, nimap), f)?;
-                    if i + 1 < num_args {
-                        f.write_str(", ")?;
-                    }
-                }
-                f.write_char(')')?;
-            }
-            Ok(())
-        }
-    }
-
-    impl<'a, T: Debug> Debug for NamedTermDeepView<'a, T> {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let Self { view, nimap } = self;
-
-            let functor = view.functor();
-            let args = view.args();
-            let num_args = args.len();
-
-            if num_args == 0 {
-                if let Some(name) = nimap.get_name(functor) {
-                    fmt::Debug::fmt(name, f)
-                } else {
-                    fmt::Debug::fmt(functor, f)
-                }
-            } else {
-                let name_str = if let Some(name) = nimap.get_name(functor) {
-                    format!("{:?}", name)
-                } else {
-                    format!("{:?}", functor)
-                };
-                let mut d = f.debug_tuple(&name_str);
-
-                for arg in args {
-                    d.field(&Self::new(arg, nimap));
-                }
-                d.finish()
-            }
-        }
-    }
-
     pub struct NamedExprView<'a, T> {
         view: ExprView<'a, Integer>,
         nimap: &'a NameIntMap<T>,
@@ -1475,9 +1432,8 @@ pub(crate) mod format {
         /// let interner = StrInterner::new();
         /// let clause: Clause<_> = parse_str("outdoors :- sunny, warm.", &interner).unwrap();
         /// let expected: Term<_> = parse_str("warm", &interner).unwrap();
-        /// let mut db = Database::new();
+        /// let mut db = Database::default();
         /// db.insert_clause(clause);
-        /// db.commit();
         ///
         /// let body = db.clauses().next().unwrap().body().unwrap();
         /// assert!(body.contains_term(&expected));

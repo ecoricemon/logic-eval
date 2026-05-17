@@ -6,7 +6,7 @@
 use logic_eval::{parse_str, Database, StrInterner};
 
 fn main() {
-    let mut db = Database::new();
+    let mut db = Database::default();
     let interner = StrInterner::new();
 
     // Facts describe users, roles, and documents.
@@ -27,7 +27,6 @@ fn main() {
     "#;
 
     db.insert_dataset(parse_str(policy, &interner).unwrap());
-    db.commit();
 
     println!("Who can read the handbook?");
     {

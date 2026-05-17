@@ -31,3 +31,36 @@ impl<'int> Atom for Name<any_intern::Interned<'int, str>> {
         self.starts_with(VAR_PREFIX)
     }
 }
+
+impl Atom for String {
+    fn is_variable(&self) -> bool {
+        self.starts_with(VAR_PREFIX)
+    }
+}
+
+impl<T> Atom for Box<T>
+where
+    T: Atom + AsRef<str>,
+{
+    fn is_variable(&self) -> bool {
+        (**self).as_ref().starts_with(VAR_PREFIX)
+    }
+}
+
+impl<T> Atom for std::rc::Rc<T>
+where
+    T: Atom + AsRef<str>,
+{
+    fn is_variable(&self) -> bool {
+        (**self).as_ref().starts_with(VAR_PREFIX)
+    }
+}
+
+impl<T> Atom for std::sync::Arc<T>
+where
+    T: Atom + AsRef<str>,
+{
+    fn is_variable(&self) -> bool {
+        (**self).as_ref().starts_with(VAR_PREFIX)
+    }
+}
