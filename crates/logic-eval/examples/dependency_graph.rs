@@ -5,7 +5,7 @@
 use logic_eval::{parse_str, Database, StrInterner};
 
 fn main() {
-    let mut db = Database::new();
+    let mut db = Database::default();
     let interner = StrInterner::new();
 
     // Direct dependencies are facts. The recursive rule finds indirect dependencies.
@@ -24,7 +24,6 @@ fn main() {
     "#;
 
     db.insert_dataset(parse_str(graph, &interner).unwrap());
-    db.commit();
 
     println!("app requires:");
     {

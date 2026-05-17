@@ -18,25 +18,6 @@ pub(crate) struct TermStorage<T> {
 }
 
 impl<T> TermStorage<T> {
-    pub(crate) fn new() -> Self {
-        Self {
-            exprs: ExprArray::new(),
-            terms: UniqueTermArray::new(),
-        }
-    }
-
-    pub(crate) fn len(&self) -> TermStorageLen {
-        TermStorageLen {
-            expr_len: self.exprs.len(),
-            term_len: self.terms.len(),
-        }
-    }
-
-    pub(crate) fn truncate(&mut self, len: TermStorageLen) {
-        self.exprs.truncate(len.expr_len);
-        self.terms.truncate(len.term_len);
-    }
-
     pub(crate) fn get_expr(&self, id: ExprId) -> ExprView<'_, T> {
         self.exprs.get(id, &self.terms.buf)
     }
@@ -62,24 +43,33 @@ impl<T: Clone + Eq + Hash> TermStorage<T> {
     pub(crate) fn insert_term(&mut self, term: Term<T>) -> TermId {
         self.terms.insert(term)
     }
+
+    // TODO: It seems to be a redundant deserialization and serialization.
+    pub(crate) fn import_clause(&mut self, src: &Self, clause: ClauseId) -> ClauseId {
+        ClauseId {
+            head: self.insert_term(src.get_term(clause.head).deserialize()),
+            body: clause
+                .body
+                .map(|expr| self.insert_expr(src.get_expr(expr).deserialize())),
+        }
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TermStorageLen {
-    expr_len: usize,
-    term_len: TermArrayLen,
+impl<T> Default for TermStorage<T> {
+    fn default() -> Self {
+        Self {
+            exprs: ExprArray::default(),
+            terms: UniqueTermArray::default(),
+        }
+    }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct ExprArray {
     buf: Vec<ExprElem>,
 }
 
 impl ExprArray {
-    const fn new() -> Self {
-        Self { buf: Vec::new() }
-    }
-
     fn get<'a, T>(&'a self, id: ExprId, term_buf: &'a [TermElem<T>]) -> ExprView<'a, T> {
         ExprView {
             expr_buf: &self.buf,
@@ -284,6 +274,17 @@ impl<'a, T> ExprView<'a, T> {
             ExprKind::And(args) | ExprKind::Or(args) => {
                 args.into_iter().for_each(|arg| arg.with_term(f))
             }
+        }
+    }
+}
+
+impl<'a, T: Clone> ExprView<'a, T> {
+    pub(crate) fn deserialize(self) -> Expr<T> {
+        match self.as_kind() {
+            ExprKind::Term(term) => Expr::Term(term.deserialize()),
+            ExprKind::Not(inner) => Expr::Not(Box::new(inner.deserialize())),
+            ExprKind::And(args) => Expr::And(args.map(Self::deserialize).collect()),
+            ExprKind::Or(args) => Expr::Or(args.map(Self::deserialize).collect()),
         }
     }
 }
@@ -710,13 +711,6 @@ pub(crate) struct UniqueTermArray<T> {
 }
 
 impl<T> UniqueTermArray<T> {
-    fn new() -> Self {
-        Self {
-            buf: Vec::new(),
-            map: PassThroughIndexMap::default(),
-        }
-    }
-
     pub(crate) fn terms(&self) -> TermViewIter<'_, T> {
         TermViewIter {
             buf: &self.buf,
@@ -734,18 +728,6 @@ impl<T> UniqueTermArray<T> {
 
     pub(crate) fn get_mut(&mut self, id: TermId) -> TermViewMut<'_, T> {
         TermViewMut { arr: self, id }
-    }
-
-    pub(crate) fn len(&self) -> TermArrayLen {
-        TermArrayLen {
-            buf_len: self.buf.len(),
-            map_len: self.map.len(),
-        }
-    }
-
-    pub(crate) fn truncate(&mut self, len: TermArrayLen) {
-        self.buf.truncate(len.buf_len);
-        self.map.truncate(len.map_len);
     }
 
     fn reserve(&mut self, additional: usize) -> usize {
@@ -850,6 +832,15 @@ impl<T: Clone + Eq + Hash + PartialEq> UniqueTermArray<T> {
     }
 }
 
+impl<T> Default for UniqueTermArray<T> {
+    fn default() -> Self {
+        Self {
+            buf: Vec::new(),
+            map: PassThroughIndexMap::default(),
+        }
+    }
+}
+
 impl<T> AsRef<[TermElem<T>]> for UniqueTermArray<T> {
     fn as_ref(&self) -> &[TermElem<T>] {
         &self.buf
@@ -903,12 +894,6 @@ impl<T: PartialEq + Hash> Iterator for SimilarTerms<'_, T> {
 }
 
 impl<T: PartialEq + Hash> iter::FusedIterator for SimilarTerms<'_, T> {}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TermArrayLen {
-    buf_len: usize,
-    map_len: usize,
-}
 
 pub(crate) struct TermViewIter<'a, T> {
     buf: &'a [TermElem<T>],
@@ -1513,7 +1498,7 @@ mod tests {
 
     #[test]
     fn test_expr_array_replace_term() {
-        let mut buf = TermStorage::new();
+        let mut buf = TermStorage::default();
         let interner = DroplessInterner::default();
 
         let id_expr = insert_expr(&mut buf, &interner, "f(g(X)), (Y; Z), X");
@@ -1567,7 +1552,7 @@ mod tests {
 
     #[test]
     fn test_expr_array_replace_expr() {
-        let mut buf = TermStorage::new();
+        let mut buf = TermStorage::default();
         let interner = DroplessInterner::default();
 
         let id_expr = insert_expr(&mut buf, &interner, "X, Y");
@@ -1612,7 +1597,7 @@ mod tests {
 
     #[test]
     fn test_term_array_replace() {
-        let mut arr = UniqueTermArray::new();
+        let mut arr = UniqueTermArray::default();
         let interner = DroplessInterner::default();
 
         let id_x = insert_term(&mut arr, &interner, "X");
@@ -1670,7 +1655,7 @@ mod tests {
     #[test]
     #[rustfmt::skip]
     fn test_term_array_replace_with() {
-        let mut arr = UniqueTermArray::new();
+        let mut arr = UniqueTermArray::default();
         let interner = DroplessInterner::default();
 
         let id_f = insert_term(&mut arr, &interner, "f($X, $Y, $X)");
@@ -1727,7 +1712,7 @@ mod tests {
 
     #[test]
     fn test_recursive_term() {
-        let mut arr = UniqueTermArray::new();
+        let mut arr = UniqueTermArray::default();
         let interner = DroplessInterner::default();
 
         insert_term(&mut arr, &interner, "f(f(a))");

@@ -1,9 +1,9 @@
 use super::{
     prover::{
         format::{NamedExprView, NamedTermView},
-        Integer, NameIntMap, NameIntMapState, ProveCx, Prover,
+        Integer, NameIntMap, ProveCx, Prover,
     },
-    repr::{ClauseId, TermStorage, TermStorageLen},
+    repr::{ClauseId, TermStorage},
 };
 use crate::{
     parse::{
@@ -26,14 +26,8 @@ pub struct Database<T> {
     /// Predicates that should be handled by tabling.
     table_clauses: IndexSet<Predicate<Integer>>,
 
-    /// We do not allow duplicate clauses in the dataset.
-    dup_checker: DuplicateClauseChecker,
-
     /// Term and expression storage.
     stor: TermStorage<Integer>,
-
-    /// Proof search engine.
-    prover: Prover,
 
     /// Mappings between `T` and [`Integer`].
     ///
@@ -41,37 +35,11 @@ pub struct Database<T> {
     /// `T`.
     nimap: NameIntMap<T>,
 
-    /// States of the database fields.
-    ///
-    /// Used when discarding uncommitted database changes.
-    revert_point: Option<DatabaseState>,
+    /// We do not allow duplicate clauses in the dataset.
+    dup_checker: DuplicateClauseChecker,
 }
 
 impl<T: Atom> Database<T> {
-    /// Creates an empty database.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use logic_eval::{Database, InternedStr, Name};
-    ///
-    /// type Db<'a> = Database<Name<InternedStr<'a>>>;
-    ///
-    /// let db: Db<'_> = Database::new();
-    /// assert_eq!(db.clauses().count(), 0);
-    /// ```
-    pub fn new() -> Self {
-        Self {
-            clauses: IndexMap::default(),
-            table_clauses: IndexSet::default(),
-            dup_checker: DuplicateClauseChecker::default(),
-            stor: TermStorage::new(),
-            prover: Prover::new(),
-            nimap: NameIntMap::new(),
-            revert_point: None,
-        }
-    }
-
     /// Iterates over all terms stored in the database.
     ///
     /// # Examples
@@ -81,9 +49,8 @@ impl<T: Atom> Database<T> {
     ///
     /// let interner = StrInterner::new();
     /// let clause: Clause<_> = parse_str("sunny.", &interner).unwrap();
-    /// let mut db = Database::new();
+    /// let mut db = Database::default();
     /// db.insert_clause(clause);
-    /// db.commit();
     ///
     /// let terms = db.terms().map(|term| term.to_string()).collect::<Vec<_>>();
     /// assert_eq!(terms, vec!["sunny"]);
@@ -104,9 +71,8 @@ impl<T: Atom> Database<T> {
     ///
     /// let interner = StrInterner::new();
     /// let clause: Clause<_> = parse_str("sunny.", &interner).unwrap();
-    /// let mut db = Database::new();
+    /// let mut db = Database::default();
     /// db.insert_clause(clause);
-    /// db.commit();
     ///
     /// let clauses = db.clauses().map(|clause| clause.to_string()).collect::<Vec<_>>();
     /// assert_eq!(clauses, vec!["sunny."]);
@@ -130,10 +96,9 @@ impl<T: Atom> Database<T> {
     ///
     /// let interner = StrInterner::new();
     /// let dataset: ClauseDataset<_> = parse_str("sunny.\nwarm.", &interner).unwrap();
-    /// let mut db = Database::new();
+    /// let mut db = Database::default();
     ///
     /// db.insert_dataset(dataset);
-    /// db.commit();
     ///
     /// assert_eq!(db.clauses().count(), 2);
     /// ```
@@ -153,19 +118,13 @@ impl<T: Atom> Database<T> {
     /// let interner = StrInterner::new();
     /// let clause: Clause<_> = parse_str("sunny.", &interner).unwrap();
     /// let query: Expr<_> = parse_str("sunny", &interner).unwrap();
-    /// let mut db = Database::new();
+    /// let mut db = Database::default();
     ///
     /// db.insert_clause(clause);
-    /// db.commit();
     ///
     /// assert!(db.query(query).is_true());
     /// ```
     pub fn insert_clause(&mut self, clause: Clause<T>) {
-        // Saves current state. We will revert DB when the change is not committed.
-        if self.revert_point.is_none() {
-            self.revert_point = Some(self.state());
-        }
-
         let clause = clause.map(&mut |t| self.nimap.name_to_int(t));
 
         // Records whether the clause needs tabling.
@@ -194,7 +153,7 @@ impl<T: Atom> Database<T> {
             .or_insert(vec![value]);
     }
 
-    /// Starts a query against the committed database.
+    /// Starts a query against the database.
     ///
     /// # Examples
     ///
@@ -204,9 +163,8 @@ impl<T: Atom> Database<T> {
     /// let interner = StrInterner::new();
     /// let dataset: ClauseDataset<_> = parse_str("parent(alice, bob).", &interner).unwrap();
     /// let query: Expr<_> = parse_str("parent(alice, $Who)", &interner).unwrap();
-    /// let mut db = Database::new();
+    /// let mut db = Database::default();
     /// db.insert_dataset(dataset);
-    /// db.commit();
     ///
     /// let mut cx = db.query(query);
     /// let answer = cx.prove_next().unwrap().next().unwrap();
@@ -214,40 +172,14 @@ impl<T: Atom> Database<T> {
     /// assert_eq!(answer.get_lhs_variable().as_ref(), "$Who");
     /// assert_eq!(answer.rhs().to_string(), "bob");
     /// ```
-    pub fn query(&mut self, expr: Expr<T>) -> ProveCx<'_, T> {
-        // Discards uncommitted changes.
-        if let Some(revert_point) = self.revert_point.take() {
-            self.revert(revert_point);
-        }
-
-        self.prover.prove(
+    pub fn query(&self, expr: Expr<T>) -> ProveCx<'_, T> {
+        Prover::new().prove(
             expr,
             &self.clauses,
             &self.table_clauses,
-            &mut self.stor,
-            &mut self.nimap,
+            &self.stor,
+            &self.nimap,
         )
-    }
-
-    /// Commits pending clause insertions.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use logic_eval::{parse_str, Clause, Database, Expr, StrInterner};
-    ///
-    /// let interner = StrInterner::new();
-    /// let clause: Clause<_> = parse_str("sunny.", &interner).unwrap();
-    /// let query: Expr<_> = parse_str("sunny", &interner).unwrap();
-    /// let mut db = Database::new();
-    ///
-    /// db.insert_clause(clause);
-    /// db.commit();
-    ///
-    /// assert!(db.query(query).is_true());
-    /// ```
-    pub fn commit(&mut self) {
-        self.revert_point.take();
     }
 
     /// * sanitize - Removes unacceptable characters from prolog.
@@ -262,9 +194,8 @@ impl<T: Atom> Database<T> {
     ///
     /// let interner = StrInterner::new();
     /// let dataset: ClauseDataset<_> = parse_str("parent(Alice, Bob).", &interner).unwrap();
-    /// let mut db = Database::new();
+    /// let mut db = Database::default();
     /// db.insert_dataset(dataset);
-    /// db.commit();
     ///
     /// let prolog = db.to_prolog(|name| name);
     /// assert_eq!(prolog, "parent(alice, bob).\n");
@@ -440,39 +371,17 @@ impl<T: Atom> Database<T> {
             }
         }
     }
-
-    fn revert(
-        &mut self,
-        DatabaseState {
-            clauses_len,
-            clause_set_len,
-            stor_len,
-            nimap_state,
-        }: DatabaseState,
-    ) {
-        self.clauses.truncate(clauses_len.len());
-        for (i, len) in clauses_len.into_iter().enumerate() {
-            self.clauses[i].truncate(len);
-        }
-        self.dup_checker.truncate(clause_set_len);
-        self.stor.truncate(stor_len);
-        self.nimap.revert(nimap_state);
-        // `self.prover: Prover` does not store any persistent data.
-    }
-
-    fn state(&self) -> DatabaseState {
-        DatabaseState {
-            clauses_len: self.clauses.values().map(|v| v.len()).collect(),
-            clause_set_len: self.dup_checker.len(),
-            stor_len: self.stor.len(),
-            nimap_state: self.nimap.state(),
-        }
-    }
 }
 
-impl<T: Atom> Default for Database<T> {
+impl<T> Default for Database<T> {
     fn default() -> Self {
-        Self::new()
+        Self {
+            clauses: IndexMap::default(),
+            table_clauses: IndexSet::default(),
+            stor: TermStorage::default(),
+            nimap: NameIntMap::default(),
+            dup_checker: DuplicateClauseChecker::default(),
+        }
     }
 }
 
@@ -480,20 +389,12 @@ impl<T: Debug> Debug for Database<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Database")
             .field("clauses", &self.clauses)
-            .field("dup_checker", &self.dup_checker)
+            .field("table_clauses", &self.table_clauses)
             .field("stor", &self.stor)
             .field("nimap", &self.nimap)
-            .field("revert_point", &self.revert_point)
+            .field("dup_checker", &self.dup_checker)
             .finish_non_exhaustive()
     }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct DatabaseState {
-    clauses_len: Vec<usize>,
-    clause_set_len: usize,
-    stor_len: TermStorageLen,
-    nimap_state: NameIntMapState,
 }
 
 #[derive(Debug, Default)]
@@ -522,14 +423,6 @@ impl DuplicateClauseChecker {
         let is_new = self.seen.insert(canonical_clause);
         self.vars.clear();
         is_new
-    }
-
-    fn len(&self) -> usize {
-        self.seen.len()
-    }
-
-    fn truncate(&mut self, len: usize) {
-        self.seen.truncate(len);
     }
 }
 
@@ -645,9 +538,8 @@ impl<'a, T: Atom> ClauseRef<'a, T> {
     ///
     /// let interner = StrInterner::new();
     /// let clause: Clause<_> = parse_str("outdoors :- sunny.", &interner).unwrap();
-    /// let mut db = Database::new();
+    /// let mut db = Database::default();
     /// db.insert_clause(clause);
-    /// db.commit();
     ///
     /// let clause = db.clauses().next().unwrap();
     /// assert_eq!(clause.head().to_string(), "outdoors");
@@ -666,9 +558,8 @@ impl<'a, T: Atom> ClauseRef<'a, T> {
     ///
     /// let interner = StrInterner::new();
     /// let clause: Clause<_> = parse_str("outdoors :- sunny.", &interner).unwrap();
-    /// let mut db = Database::new();
+    /// let mut db = Database::default();
     /// db.insert_clause(clause);
-    /// db.commit();
     ///
     /// let clause = db.clauses().next().unwrap();
     /// assert_eq!(clause.body().unwrap().to_string(), "sunny");
@@ -728,7 +619,7 @@ impl<'a, T: Atom> Iterator for NamedTermViewIter<'a, T> {
 impl<T: Atom> FusedIterator for NamedTermViewIter<'_, T> {}
 
 #[cfg(test)]
-mod str_atom_tests {
+mod tests {
     use crate::{parse, NameIn};
 
     type Interner = any_intern::DroplessInterner;
@@ -750,7 +641,7 @@ mod str_atom_tests {
             assert_eq!(answer, expected);
         }
 
-        let mut db = Database::new();
+        let mut db = Database::default();
         let interner = Interner::new();
 
         for _ in 0..2 {
@@ -763,15 +654,15 @@ mod str_atom_tests {
                 g($X) :- f($X).
                 ",
             );
-            let len = db.stor.len();
+            let len = db.terms().count();
             assert_query(&mut db, &interner);
-            assert_eq!(db.stor.len(), len);
+            assert_eq!(db.terms().count(), len);
         }
     }
 
     #[test]
     fn test_not_expression() {
-        let mut db = Database::new();
+        let mut db = Database::default();
         let interner = Interner::new();
 
         insert_dataset(
@@ -794,7 +685,7 @@ mod str_atom_tests {
 
     #[test]
     fn test_and_expression() {
-        let mut db = Database::new();
+        let mut db = Database::default();
         let interner = Interner::new();
 
         insert_dataset(
@@ -816,7 +707,7 @@ mod str_atom_tests {
 
     #[test]
     fn test_or_expression() {
-        let mut db = Database::new();
+        let mut db = Database::default();
         let interner = Interner::new();
 
         insert_dataset(
@@ -837,7 +728,7 @@ mod str_atom_tests {
 
     #[test]
     fn test_mixed_expression() {
-        let mut db = Database::new();
+        let mut db = Database::default();
         let interner = Interner::new();
 
         insert_dataset(
@@ -865,7 +756,7 @@ mod str_atom_tests {
 
     #[test]
     fn test_and_has_higher_precedence_than_or() {
-        let mut db = Database::new();
+        let mut db = Database::default();
         let interner = Interner::new();
 
         insert_dataset(
@@ -898,7 +789,7 @@ mod str_atom_tests {
 
     #[test]
     fn test_parentheses_override_and_or_precedence() {
-        let mut db = Database::new();
+        let mut db = Database::default();
         let interner = Interner::new();
 
         insert_dataset(
@@ -924,7 +815,7 @@ mod str_atom_tests {
 
     #[test]
     fn test_not_applies_to_parenthesized_or() {
-        let mut db = Database::new();
+        let mut db = Database::default();
         let interner = Interner::new();
 
         insert_dataset(
@@ -954,7 +845,7 @@ mod str_atom_tests {
 
     #[test]
     fn test_not_with_grouped_and_or_expression() {
-        let mut db = Database::new();
+        let mut db = Database::default();
         let interner = Interner::new();
 
         insert_dataset(
@@ -996,7 +887,7 @@ mod str_atom_tests {
 
     #[test]
     fn test_simple_recursion() {
-        let mut db = Database::new();
+        let mut db = Database::default();
         let interner = Interner::new();
 
         insert_dataset(
@@ -1032,7 +923,7 @@ mod str_atom_tests {
 
     #[test]
     fn test_right_recursion() {
-        let mut db = Database::new();
+        let mut db = Database::default();
         let interner = Interner::new();
 
         insert_dataset(
@@ -1067,7 +958,7 @@ mod str_atom_tests {
     // SLG resolution (tabling) is required to pass this test.
     #[test]
     fn test_mid_recursion() {
-        let mut db = Database::new();
+        let mut db = Database::default();
         let interner = Interner::new();
 
         insert_dataset(
@@ -1105,7 +996,7 @@ mod str_atom_tests {
     // SLG resolution (tabling) is required to pass this test.
     #[test]
     fn test_left_recursion() {
-        let mut db = Database::new();
+        let mut db = Database::default();
         let interner = Interner::new();
 
         insert_dataset(
@@ -1138,25 +1029,76 @@ mod str_atom_tests {
     }
 
     #[test]
-    fn test_discarding_uncomitted_change() {
-        let mut db = Database::new();
+    fn test_inserted_clause_is_immediately_visible_to_query() {
+        let mut db = Database::default();
         let interner = Interner::new();
 
         let clause: Clause<'_> = parse::parse_str("f(a).", &interner).unwrap();
         db.insert_clause(clause);
-        let fa_state = db.state();
-        db.commit();
 
         let clause: Clause<'_> = parse::parse_str("f(b).", &interner).unwrap();
         db.insert_clause(clause);
+        assert_eq!(db.clauses().count(), 2);
 
         let query: Expr<'_> = parse::parse_str("f($X).", &interner).unwrap();
-        let answer = collect_answer(db.query(query));
-
-        // `f(b).` was discarded.
-        let expected = [["$X = a"]];
+        let mut answer = collect_answer(db.query(query));
+        let mut expected = [["$X = a"], ["$X = b"]];
+        answer.sort_unstable();
+        expected.sort_unstable();
         assert_eq!(answer, expected);
-        assert_eq!(db.state(), fa_state);
+    }
+
+    #[test]
+    fn test_database_and_query_context_are_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<crate::Database<String>>();
+    }
+
+    #[test]
+    fn test_query_from_multiple_threads() {
+        let mut db = Database::default();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            parent(alice, bob).
+            parent(alice, carol).
+            parent(carol, dave).
+
+            ancestor($X, $Y) :- parent($X, $Y).
+            ancestor($X, $Z) :- parent($X, $Y), ancestor($Y, $Z).
+            ",
+        );
+
+        let barrier = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..4 {
+                let db = &db;
+                let barrier = &barrier;
+                handles.push(scope.spawn(|| {
+                    barrier.wait();
+
+                    let query: Expr<'_> =
+                        parse::parse_str("ancestor(alice, $Who).", &interner).unwrap();
+
+                    let mut answers = collect_answer(db.query(query))
+                        .into_iter()
+                        .collect::<Vec<_>>();
+                    answers.sort_unstable();
+                    answers
+                }));
+            }
+
+            for handle in handles {
+                assert_eq!(
+                    handle.join().unwrap(),
+                    [["$Who = bob"], ["$Who = carol"], ["$Who = dave"]]
+                );
+            }
+        });
     }
 
     // === Test helper functions ===
@@ -1164,7 +1106,6 @@ mod str_atom_tests {
     fn insert_dataset<'int>(db: &mut Database<'int>, interner: &'int Interner, text: &str) {
         let dataset: ClauseDataset<'int> = parse::parse_str(text, interner).unwrap();
         db.insert_dataset(dataset);
-        db.commit();
     }
 
     fn collect_answer(mut cx: ProveCx<'_, '_>) -> Vec<Vec<String>> {
@@ -1178,8 +1119,8 @@ mod str_atom_tests {
 }
 
 #[cfg(test)]
-mod tests {
-    use crate::{Atom, Clause, ClauseDataset, Database, Expr, ProveCx, Term};
+mod custom_atom_tests {
+    use crate::{Atom, Clause, Database, Expr, ProveCx, Term};
 
     #[test]
     fn test_custom_atom() {
@@ -1203,7 +1144,7 @@ mod tests {
             }
         }
 
-        let mut db = Database::new();
+        let mut db = Database::default();
 
         let child_a_b = Clause::fact(Term::compound(
             A::child,
@@ -1228,16 +1169,13 @@ mod tests {
                 Expr::term_compound(A::descend, [Term::atom(A::Y), Term::atom(A::Z)]),
             ]),
         );
-        insert_dataset(
-            &mut db,
-            crate::ClauseDataset(vec![
-                child_a_b,
-                child_b_c,
-                child_c_d,
-                descend_x_y,
-                descend_x_z,
-            ]),
-        );
+        db.insert_dataset(crate::ClauseDataset(vec![
+            child_a_b,
+            child_b_c,
+            child_c_d,
+            descend_x_y,
+            descend_x_z,
+        ]));
 
         let query = Expr::term_compound(A::descend, [Term::atom(A::X), Term::atom(A::Y)]);
         let mut answer = collect_answer(db.query(query));
@@ -1275,11 +1213,6 @@ mod tests {
     }
 
     // === Test helper functions ===
-
-    fn insert_dataset<T: Atom>(db: &mut Database<T>, dataset: ClauseDataset<T>) {
-        db.insert_dataset(dataset);
-        db.commit();
-    }
 
     fn collect_answer<T: Atom>(mut cx: ProveCx<'_, T>) -> Vec<Vec<(Term<T>, Term<T>)>> {
         let mut v = Vec::new();
