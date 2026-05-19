@@ -1,7 +1,7 @@
 use super::{
-    prover::{
+    proof_engine::{
         format::{NamedExprView, NamedTermView},
-        Integer, NameIntMap, ProveCx, Prover,
+        AtomId, NameInterner, ProofEngine, QueryCx,
     },
     repr::{ClauseId, TermStorage},
 };
@@ -21,19 +21,19 @@ use core::{
 /// A clause database that can answer logic queries.
 pub struct Database<T> {
     /// Clauses grouped by predicate.
-    clauses: IndexMap<Predicate<Integer>, Vec<ClauseId>>,
+    clauses: IndexMap<Predicate<AtomId>, Vec<ClauseId>>,
 
     /// Predicates that should be handled by tabling.
-    table_clauses: IndexSet<Predicate<Integer>>,
+    tabled_predicates: IndexSet<Predicate<AtomId>>,
 
     /// Term and expression storage.
-    stor: TermStorage<Integer>,
+    database_storage: TermStorage<AtomId>,
 
-    /// Mappings between `T` and [`Integer`].
+    /// Mappings between `T` and [`AtomId`].
     ///
-    /// [`Integer`] is used internally for fast comparison, but clients need values mapped back to
+    /// [`AtomId`] is used internally for fast comparison, but clients need values mapped back to
     /// `T`.
-    nimap: NameIntMap<T>,
+    name_interner: NameInterner<T>,
 
     /// We do not allow duplicate clauses in the dataset.
     dup_checker: DuplicateClauseChecker,
@@ -57,8 +57,8 @@ impl<T: Atom> Database<T> {
     /// ```
     pub fn terms(&self) -> NamedTermViewIter<'_, T> {
         NamedTermViewIter {
-            term_iter: self.stor.terms.terms(),
-            nimap: &self.nimap,
+            term_iter: self.database_storage.terms.terms(),
+            name_interner: &self.name_interner,
         }
     }
 
@@ -80,8 +80,8 @@ impl<T: Atom> Database<T> {
     pub fn clauses(&self) -> ClauseIter<'_, T> {
         ClauseIter {
             clauses: &self.clauses,
-            stor: &self.stor,
-            nimap: &self.nimap,
+            database_storage: &self.database_storage,
+            name_interner: &self.name_interner,
             i: 0,
             j: 0,
         }
@@ -125,11 +125,11 @@ impl<T: Atom> Database<T> {
     /// assert!(db.query(query).is_true());
     /// ```
     pub fn insert_clause(&mut self, clause: Clause<T>) {
-        let clause = clause.map(&mut |t| self.nimap.name_to_int(t));
+        let clause = clause.map(&mut |t| self.name_interner.intern(t));
 
         // Records whether the clause needs tabling.
         if clause.needs_tabling() {
-            self.table_clauses.insert(clause.head.predicate());
+            self.tabled_predicates.insert(clause.head.predicate());
         }
 
         // If the DB already contains the given clause, then returns.
@@ -139,15 +139,17 @@ impl<T: Atom> Database<T> {
 
         let key = clause.head.predicate();
         let value = ClauseId {
-            head: self.stor.insert_term(clause.head),
-            body: clause.body.map(|expr| self.stor.insert_expr(expr)),
+            head: self.database_storage.insert_term(clause.head),
+            body: clause
+                .body
+                .map(|expr| self.database_storage.insert_expr(expr)),
         };
 
         self.clauses
             .entry(key)
-            .and_modify(|similar_clauses| {
-                if similar_clauses.iter().all(|clause| clause != &value) {
-                    similar_clauses.push(value);
+            .and_modify(|candidate_clauses| {
+                if candidate_clauses.iter().all(|clause| clause != &value) {
+                    candidate_clauses.push(value);
                 }
             })
             .or_insert(vec![value]);
@@ -172,13 +174,13 @@ impl<T: Atom> Database<T> {
     /// assert_eq!(answer.get_lhs_variable().as_ref(), "$Who");
     /// assert_eq!(answer.rhs().to_string(), "bob");
     /// ```
-    pub fn query(&self, expr: Expr<T>) -> ProveCx<'_, T> {
-        Prover::new().prove(
+    pub fn query(&self, expr: Expr<T>) -> QueryCx<'_, T> {
+        ProofEngine::new().prove(
             expr,
             &self.clauses,
-            &self.table_clauses,
-            &self.stor,
-            &self.nimap,
+            &self.tabled_predicates,
+            &self.database_storage,
+            &self.name_interner,
         )
     }
 
@@ -207,21 +209,21 @@ impl<T: Atom> Database<T> {
         let mut prolog_text = String::new();
 
         let mut conv_map = ConversionMap {
-            int_to_str: Map::default(),
+            atom_id_to_str: Map::default(),
             sanitized_to_suffix: Map::default(),
-            nimap: &self.nimap,
+            name_interner: &self.name_interner,
             sanitizer: sanitize,
         };
 
         for clauses in self.clauses.values() {
             for clause in clauses {
-                let head = self.stor.get_term(clause.head);
+                let head = self.database_storage.get_term(clause.head);
                 write_term(head, &mut conv_map, &mut prolog_text);
 
                 if let Some(body) = clause.body {
                     prolog_text.push_str(" :- ");
 
-                    let body = self.stor.get_expr(body);
+                    let body = self.database_storage.get_expr(body);
                     write_expr(body, &mut conv_map, &mut prolog_text);
                 }
 
@@ -234,10 +236,10 @@ impl<T: Atom> Database<T> {
         // === Internal helper functions ===
 
         struct ConversionMap<'a, T, F> {
-            int_to_str: Map<Integer, String>,
+            atom_id_to_str: Map<AtomId, String>,
             // e.g. 0 -> No suffix, 1 -> _1, 2 -> _2, ...
             sanitized_to_suffix: Map<&'a str, u32>,
-            nimap: &'a NameIntMap<T>,
+            name_interner: &'a NameInterner<T>,
             sanitizer: F,
         }
 
@@ -246,9 +248,9 @@ impl<T: Atom> Database<T> {
             T: AsRef<str>,
             F: FnMut(&str) -> &str,
         {
-            fn int_to_str(&mut self, int: Integer) -> &str {
-                self.int_to_str.entry(int).or_insert_with(|| {
-                    let name = self.nimap.get_name(&int).unwrap();
+            fn atom_id_to_str(&mut self, atom_id: AtomId) -> &str {
+                self.atom_id_to_str.entry(atom_id).or_insert_with(|| {
+                    let name = self.name_interner.get_name(&atom_id).unwrap();
                     let name: &str = name.as_ref();
 
                     let mut is_var = false;
@@ -296,7 +298,7 @@ impl<T: Atom> Database<T> {
         }
 
         fn write_term<T, F>(
-            term: TermView<'_, Integer>,
+            term: TermView<'_, AtomId>,
             conv_map: &mut ConversionMap<'_, T, F>,
             prolog_text: &mut String,
         ) where
@@ -307,7 +309,7 @@ impl<T: Atom> Database<T> {
             let args = term.args();
             let num_args = args.len();
 
-            let functor = conv_map.int_to_str(*functor);
+            let functor = conv_map.atom_id_to_str(*functor);
             prolog_text.push_str(functor);
 
             if num_args > 0 {
@@ -323,7 +325,7 @@ impl<T: Atom> Database<T> {
         }
 
         fn write_expr<T, F>(
-            expr: ExprView<'_, Integer>,
+            expr: ExprView<'_, AtomId>,
             conv_map: &mut ConversionMap<'_, T, F>,
             prolog_text: &mut String,
         ) where
@@ -377,9 +379,9 @@ impl<T> Default for Database<T> {
     fn default() -> Self {
         Self {
             clauses: IndexMap::default(),
-            table_clauses: IndexSet::default(),
-            stor: TermStorage::default(),
-            nimap: NameIntMap::default(),
+            tabled_predicates: IndexSet::default(),
+            database_storage: TermStorage::default(),
+            name_interner: NameInterner::default(),
             dup_checker: DuplicateClauseChecker::default(),
         }
     }
@@ -389,9 +391,9 @@ impl<T: Debug> Debug for Database<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Database")
             .field("clauses", &self.clauses)
-            .field("table_clauses", &self.table_clauses)
-            .field("stor", &self.stor)
-            .field("nimap", &self.nimap)
+            .field("tabled_predicates", &self.tabled_predicates)
+            .field("database_storage", &self.database_storage)
+            .field("name_interner", &self.name_interner)
             .field("dup_checker", &self.dup_checker)
             .finish_non_exhaustive()
     }
@@ -399,25 +401,25 @@ impl<T: Debug> Debug for Database<T> {
 
 #[derive(Debug, Default)]
 struct DuplicateClauseChecker {
-    seen: IndexSet<Clause<Integer>>,
+    seen: IndexSet<Clause<AtomId>>,
 
-    /// Temporary buffer for assigning canonical [`Integer`]s to variables.
-    vars: Vec<Integer>,
+    /// Temporary buffer for assigning canonical [`AtomId`]s to variables.
+    vars: Vec<AtomId>,
 }
 
 impl DuplicateClauseChecker {
     /// Returns `true` if the given clause is new and has not been seen before.
-    fn insert(&mut self, clause: Clause<Integer>) -> bool {
+    fn insert(&mut self, clause: Clause<AtomId>) -> bool {
         let canonical_clause = clause.map(&mut |t| {
             if !t.is_variable() {
                 t
             } else if let Some(found) = self.vars.iter().find(|&&var| var == t) {
                 *found
             } else {
-                let next_int = self.vars.len() as u32;
-                let int = Integer::variable(next_int);
-                self.vars.push(int);
-                int
+                let next_id = self.vars.len() as u32;
+                let atom_id = AtomId::variable(next_id);
+                self.vars.push(atom_id);
+                atom_id
             }
         });
         let is_new = self.seen.insert(canonical_clause);
@@ -488,9 +490,9 @@ fn _convert_var_into_num<T: Atom>(
 /// Iterator over clauses in a [`Database`].
 #[derive(Clone)]
 pub struct ClauseIter<'a, T> {
-    clauses: &'a IndexMap<Predicate<Integer>, Vec<ClauseId>>,
-    stor: &'a TermStorage<Integer>,
-    nimap: &'a NameIntMap<T>,
+    clauses: &'a IndexMap<Predicate<AtomId>, Vec<ClauseId>>,
+    database_storage: &'a TermStorage<AtomId>,
+    name_interner: &'a NameInterner<T>,
     i: usize,
     j: usize,
 }
@@ -513,8 +515,8 @@ impl<'a, T> Iterator for ClauseIter<'a, T> {
 
         Some(ClauseRef {
             id,
-            stor: self.stor,
-            nimap: self.nimap,
+            database_storage: self.database_storage,
+            name_interner: self.name_interner,
         })
     }
 }
@@ -524,8 +526,8 @@ impl<T> FusedIterator for ClauseIter<'_, T> {}
 /// Borrowed view of a clause stored in a [`Database`].
 pub struct ClauseRef<'a, T> {
     id: ClauseId,
-    stor: &'a TermStorage<Integer>,
-    nimap: &'a NameIntMap<T>,
+    database_storage: &'a TermStorage<AtomId>,
+    name_interner: &'a NameInterner<T>,
 }
 
 impl<'a, T: Atom> ClauseRef<'a, T> {
@@ -545,8 +547,8 @@ impl<'a, T: Atom> ClauseRef<'a, T> {
     /// assert_eq!(clause.head().to_string(), "outdoors");
     /// ```
     pub fn head(&self) -> NamedTermView<'a, T> {
-        let head = self.stor.get_term(self.id.head);
-        NamedTermView::new(head, self.nimap)
+        let head = self.database_storage.get_term(self.id.head);
+        NamedTermView::new(head, self.name_interner)
     }
 
     /// Returns the clause body, if this clause is a rule.
@@ -566,8 +568,8 @@ impl<'a, T: Atom> ClauseRef<'a, T> {
     /// ```
     pub fn body(&self) -> Option<NamedExprView<'a, T>> {
         self.id.body.map(|id| {
-            let body = self.stor.get_expr(id);
-            NamedExprView::new(body, self.nimap)
+            let body = self.database_storage.get_expr(id);
+            NamedExprView::new(body, self.name_interner)
         })
     }
 }
@@ -589,12 +591,12 @@ impl<T: Atom + Debug> Debug for ClauseRef<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut d = f.debug_struct("Clause");
 
-        let head = self.stor.get_term(self.id.head);
-        d.field("head", &NamedTermView::new(head, self.nimap));
+        let head = self.database_storage.get_term(self.id.head);
+        d.field("head", &NamedTermView::new(head, self.name_interner));
 
         if let Some(body) = self.id.body {
-            let body = self.stor.get_expr(body);
-            d.field("body", &NamedExprView::new(body, self.nimap));
+            let body = self.database_storage.get_expr(body);
+            d.field("body", &NamedExprView::new(body, self.name_interner));
         }
 
         d.finish()
@@ -602,8 +604,8 @@ impl<T: Atom + Debug> Debug for ClauseRef<'_, T> {
 }
 
 pub struct NamedTermViewIter<'a, T> {
-    term_iter: TermViewIter<'a, Integer>,
-    nimap: &'a NameIntMap<T>,
+    term_iter: TermViewIter<'a, AtomId>,
+    name_interner: &'a NameInterner<T>,
 }
 
 impl<'a, T: Atom> Iterator for NamedTermViewIter<'a, T> {
@@ -612,7 +614,7 @@ impl<'a, T: Atom> Iterator for NamedTermViewIter<'a, T> {
     fn next(&mut self) -> Option<Self::Item> {
         self.term_iter
             .next()
-            .map(|view| NamedTermView::new(view, self.nimap))
+            .map(|view| NamedTermView::new(view, self.name_interner))
     }
 }
 
@@ -624,7 +626,7 @@ mod tests {
 
     type Interner = any_intern::DroplessInterner;
     type Database<'int> = crate::Database<NameIn<'int, Interner>>;
-    type ProveCx<'a, 'int> = crate::ProveCx<'a, NameIn<'int, Interner>>;
+    type QueryCx<'a, 'int> = crate::QueryCx<'a, NameIn<'int, Interner>>;
     type ClauseDataset<'int> = crate::ClauseDatasetIn<'int, Interner>;
     type Expr<'int> = crate::ExprIn<'int, Interner>;
     type Clause<'int> = crate::ClauseIn<'int, Interner>;
@@ -1108,7 +1110,7 @@ mod tests {
         db.insert_dataset(dataset);
     }
 
-    fn collect_answer(mut cx: ProveCx<'_, '_>) -> Vec<Vec<String>> {
+    fn collect_answer(mut cx: QueryCx<'_, '_>) -> Vec<Vec<String>> {
         let mut v = Vec::new();
         while let Some(eval) = cx.prove_next() {
             let x = eval.map(|assign| assign.to_string()).collect::<Vec<_>>();
@@ -1120,7 +1122,7 @@ mod tests {
 
 #[cfg(test)]
 mod custom_atom_tests {
-    use crate::{Atom, Clause, Database, Expr, ProveCx, Term};
+    use crate::{Atom, Clause, Database, Expr, QueryCx, Term};
 
     #[test]
     fn test_custom_atom() {
@@ -1214,7 +1216,7 @@ mod custom_atom_tests {
 
     // === Test helper functions ===
 
-    fn collect_answer<T: Atom>(mut cx: ProveCx<'_, T>) -> Vec<Vec<(Term<T>, Term<T>)>> {
+    fn collect_answer<T: Atom>(mut cx: QueryCx<'_, T>) -> Vec<Vec<(Term<T>, Term<T>)>> {
         let mut v = Vec::new();
         while let Some(eval) = cx.prove_next() {
             let pairs = eval.map(|assign| (assign.lhs(), assign.rhs())).collect();
