@@ -1,82 +1,52 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use logic_eval::{Atom, Clause, ClauseDataset, Database, Expr, Term};
+use logic_eval::{parse_str, ClauseDataset, Database, Expr, InternedStr, Name, StrInterner};
 
 const NODES: usize = 240;
 const QUERY_COUNT: usize = 64;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-struct BenchAtom(String);
-
-impl Atom for BenchAtom {
-    fn is_variable(&self) -> bool {
-        self.0.starts_with('$')
-    }
-}
-
-fn sym(name: impl Into<String>) -> BenchAtom {
-    BenchAtom(name.into())
-}
-
-fn atom(name: impl Into<String>) -> Term<BenchAtom> {
-    Term::atom(sym(name))
-}
-
-fn compound(
-    name: impl Into<String>,
-    args: impl IntoIterator<Item = Term<BenchAtom>>,
-) -> Term<BenchAtom> {
-    Term::compound(sym(name), args)
-}
-
-fn parent(from: usize, to: usize) -> Clause<BenchAtom> {
-    Clause::fact(compound("parent", [atom(node(from)), atom(node(to))]))
-}
+type BenchName<'a> = Name<InternedStr<'a>>;
 
 fn node(index: usize) -> String {
     format!("n{index}")
 }
 
-fn build_database() -> Database<BenchAtom> {
-    let mut clauses = Vec::new();
+fn build_database<'a>(interner: &'a StrInterner) -> Database<BenchName<'a>> {
+    let mut source = String::new();
 
     // A chain makes each ancestry query produce many answers. A few skip edges add branching so the
     // engine does enough independent work for parallel throughput to show up in the benchmark.
     for i in 0..NODES - 1 {
-        clauses.push(parent(i, i + 1));
+        source.push_str(&format!("parent({}, {}).\n", node(i), node(i + 1)));
     }
     for i in 0..NODES - 3 {
         if i % 7 == 0 {
-            clauses.push(parent(i, i + 3));
+            source.push_str(&format!("parent({}, {}).\n", node(i), node(i + 3)));
         }
     }
 
-    clauses.push(Clause::rule(
-        compound("ancestor", [atom("$X"), atom("$Y")]),
-        Expr::term(compound("parent", [atom("$X"), atom("$Y")])),
-    ));
-    clauses.push(Clause::rule(
-        compound("ancestor", [atom("$X"), atom("$Z")]),
-        Expr::expr_and([
-            Expr::term(compound("parent", [atom("$X"), atom("$Y")])),
-            Expr::term(compound("ancestor", [atom("$Y"), atom("$Z")])),
-        ]),
-    ));
+    source.push_str(
+        "
+        ancestor($X, $Y) :- parent($X, $Y).
+        ancestor($X, $Z) :- parent($X, $Y), ancestor($Y, $Z).
+        ",
+    );
 
+    let dataset: ClauseDataset<_> = parse_str(&source, interner).unwrap();
     let mut db = Database::default();
-    db.insert_dataset(ClauseDataset(clauses));
+    db.insert_dataset(dataset);
     db
 }
 
-fn build_queries() -> Vec<Expr<BenchAtom>> {
+fn build_queries<'a>(interner: &'a StrInterner) -> Vec<Expr<BenchName<'a>>> {
     (0..QUERY_COUNT)
         .map(|i| {
             let root = i % (NODES / 3);
-            Expr::term(compound("ancestor", [atom(node(root)), atom("$Who")]))
+            parse_str(&format!("ancestor({}, $Who)", node(root)), interner).unwrap()
         })
         .collect()
 }
 
-fn count_answers(db: &Database<BenchAtom>, query: Expr<BenchAtom>) -> usize {
+fn count_answers(db: &Database<BenchName<'_>>, query: Expr<BenchName<'_>>) -> usize {
     let mut cx = db.query(query);
     let mut count = 0;
     while let Some(answer) = cx.prove_next() {
@@ -85,7 +55,7 @@ fn count_answers(db: &Database<BenchAtom>, query: Expr<BenchAtom>) -> usize {
     count
 }
 
-fn run_serial(db: &Database<BenchAtom>, queries: &[Expr<BenchAtom>]) -> usize {
+fn run_serial(db: &Database<BenchName<'_>>, queries: &[Expr<BenchName<'_>>]) -> usize {
     queries
         .iter()
         .cloned()
@@ -93,7 +63,11 @@ fn run_serial(db: &Database<BenchAtom>, queries: &[Expr<BenchAtom>]) -> usize {
         .sum()
 }
 
-fn run_threaded(db: &Database<BenchAtom>, queries: &[Expr<BenchAtom>], threads: usize) -> usize {
+fn run_threaded(
+    db: &Database<BenchName<'_>>,
+    queries: &[Expr<BenchName<'_>>],
+    threads: usize,
+) -> usize {
     let chunk_len = (queries.len() + threads - 1) / threads;
 
     std::thread::scope(|scope| {
@@ -118,8 +92,9 @@ fn run_threaded(db: &Database<BenchAtom>, queries: &[Expr<BenchAtom>], threads: 
 }
 
 fn benchmark_query_threads(c: &mut Criterion) {
-    let db = build_database();
-    let queries = build_queries();
+    let interner = StrInterner::new();
+    let db = build_database(&interner);
+    let queries = build_queries(&interner);
     let expected = run_serial(&db, &queries);
 
     let mut group = c.benchmark_group("logic_eval_query_threads");
