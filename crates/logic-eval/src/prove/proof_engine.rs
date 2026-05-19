@@ -21,14 +21,14 @@ use smallvec::SmallVec;
 use std::collections::VecDeque;
 
 #[derive(Debug)]
-pub(crate) struct Prover {
+pub(crate) struct ProofEngine {
     uni_op: UnificationOperator,
 
     /// Nodes created during proof search.
     nodes: Vec<Node>,
 
     /// Variable assignments (e.g. X = a, Y = z)
-    term_assigns: TermAssignments,
+    unification_assignments: TermVariableBindings,
 
     /// A given query.
     query: ExprId,
@@ -39,7 +39,7 @@ pub(crate) struct Prover {
     query_vars: Vec<TermId>,
 
     /// Previously returned ground query answers.
-    query_answers: Vec<Vec<TermId>>,
+    seen_answers: Vec<Vec<TermId>>,
 
     /// Task queue containing node index.
     queue: NodeQueue,
@@ -48,33 +48,33 @@ pub(crate) struct Prover {
     ///
     /// This buffer is used when we convert variables into temporary variables for a clause. It is
     /// empty after each conversion.
-    temp_var_buf: Map<TermId, TermId>,
+    fresh_var_map: Map<TermId, TermId>,
 
-    /// A monotonically increasing integer used to generate temporary variables.
-    temp_var_int: u32,
+    /// A monotonically increasing counter used to generate temporary variables.
+    next_fresh_var: u32,
 
     /// SLG resolution.
     table: Table,
 
     /// Database clauses imported into query-local storage.
     ///
-    /// The cached clause is a per-query template. Each proof use still clones this template before
-    /// variable freshening, so repeated use of a database rule does not re-import from `db_stor`.
+    /// The cached clause is a per-query template. Repeated use of a database rule can freshen from
+    /// this query-local template without re-importing from `database_storage`.
     imported_clause_templates: Map<ClauseId, ClauseId>,
 }
 
-impl Prover {
+impl ProofEngine {
     pub(crate) fn new() -> Self {
         Self {
             uni_op: UnificationOperator::new(),
             nodes: Vec::new(),
-            term_assigns: TermAssignments::default(),
+            unification_assignments: TermVariableBindings::default(),
             query: ExprId(0),
             query_vars: Vec::new(),
-            query_answers: Vec::new(),
+            seen_answers: Vec::new(),
             queue: NodeQueue::default(),
-            temp_var_buf: Map::default(),
-            temp_var_int: 0,
+            fresh_var_map: Map::default(),
+            next_fresh_var: 0,
             table: Table::default(),
             imported_clause_templates: Map::default(),
         }
@@ -83,9 +83,9 @@ impl Prover {
     fn clear(&mut self) {
         self.uni_op.clear();
         self.nodes.clear();
-        self.term_assigns.clear();
+        self.unification_assignments.clear();
         self.query_vars.clear();
-        self.query_answers.clear();
+        self.seen_answers.clear();
         self.queue.clear();
         self.table.clear();
         self.imported_clause_templates.clear();
@@ -94,12 +94,19 @@ impl Prover {
     pub(crate) fn prove<'a, T: Atom>(
         self,
         query: Expr<T>,
-        clauses: &'a IndexMap<Predicate<Integer>, Vec<ClauseId>>,
-        table_clauses: &'a IndexSet<Predicate<Integer>>,
-        db_stor: &'a TermStorage<Integer>,
-        db_nimap: &'a NameIntMap<T>,
-    ) -> ProveCx<'a, T> {
-        ProveCx::new(self, query, clauses, table_clauses, db_stor, db_nimap)
+        clauses: &'a IndexMap<Predicate<AtomId>, Vec<ClauseId>>,
+        tabled_predicates: &'a IndexSet<Predicate<AtomId>>,
+        database_storage: &'a TermStorage<AtomId>,
+        database_name_interner: &'a NameInterner<T>,
+    ) -> QueryCx<'a, T> {
+        QueryCx::new(
+            self,
+            query,
+            clauses,
+            tabled_predicates,
+            database_storage,
+            database_name_interner,
+        )
     }
 
     /// Evaluates the given node against matching clauses or table answers, then returns whether a
@@ -110,10 +117,10 @@ impl Prover {
     fn evaluate_node(
         &mut self,
         node_index: usize,
-        clauses: &IndexMap<Predicate<Integer>, Vec<ClauseId>>,
-        table_clauses: &IndexSet<Predicate<Integer>>,
-        db_stor: &TermStorage<Integer>,
-        stor: &mut TermStorage<Integer>,
+        clauses: &IndexMap<Predicate<AtomId>, Vec<ClauseId>>,
+        tabled_predicates: &IndexSet<Predicate<AtomId>>,
+        database_storage: &TermStorage<AtomId>,
+        query_storage: &mut TermStorage<AtomId>,
     ) -> Option<bool> {
         let node_expr = match self.nodes[node_index].kind {
             NodeKind::Expr(expr_id) => expr_id,
@@ -122,22 +129,22 @@ impl Prover {
                 // On a successful proof, records the answer in the nearest ancestor-owned SLG
                 // table entry, then notifies all waiting consumers.
                 if eval {
-                    self.update_answer_and_notify(node_index, stor);
+                    self.update_answer_and_notify(node_index, query_storage);
                 }
                 return Some(eval);
             }
         };
 
-        let node_leftmost = stor.get_expr(node_expr).leftmost_term().id;
-        let node_leftmost_pred = stor.get_term(node_leftmost).predicate();
-        let mut similar_clauses: SmallVec<[ClauseId; 2]> = SmallVec::new();
+        let node_leftmost = query_storage.get_expr(node_expr).leftmost_term().id;
+        let node_leftmost_pred = query_storage.get_term(node_leftmost).predicate();
+        let mut candidate_clauses: SmallVec<[ClauseId; 2]> = SmallVec::new();
 
         // === SLG path ===
         // * Table entry - Created from non-canonical leftmost term of the node. In tabling,
         //   we use canonical variables for table keys only.
 
-        if table_clauses.contains(&node_leftmost_pred) {
-            let key = canonical::canonicalize_term_id(stor, node_leftmost);
+        if tabled_predicates.contains(&node_leftmost_pred) {
+            let key = canonical::canonicalize_term_id(query_storage, node_leftmost);
             if let Some((_, entry)) = self.table.get_mut(&key) {
                 entry.register_consumer(node_index);
 
@@ -151,12 +158,12 @@ impl Prover {
                 self.nodes[node_index].table_answer_offset = next_offset;
 
                 // Synthesize an answer clause, then unify it with the current node.
-                let mut term = stor.get_term_mut(node_leftmost);
+                let mut term = query_storage.get_term_mut(node_leftmost);
                 let vars = term.as_view().collect_variables();
                 for (var, answer) in vars.into_iter().zip(answers) {
                     term.replace(var, *answer);
                 }
-                similar_clauses.push(ClauseId {
+                candidate_clauses.push(ClauseId {
                     head: term.id(),
                     body: None,
                 });
@@ -167,7 +174,9 @@ impl Prover {
                 }
             } else {
                 // First encounter: create a table entry, then proceed with SLD.
-                if let Some(entry) = TableEntry::from_term_view(&stor.get_term(node_leftmost)) {
+                if let Some(entry) =
+                    TableEntry::from_term_view(&query_storage.get_term(node_leftmost))
+                {
                     let index = self.table.register(key, entry);
                     self.nodes[node_index].table_owner = Some(index);
                 }
@@ -176,38 +185,38 @@ impl Prover {
 
         // === BFS based SLD path ===
 
-        if similar_clauses.is_empty() {
+        if candidate_clauses.is_empty() {
             if let Some(v) = clauses.get(&node_leftmost_pred) {
                 for &clause in v {
                     let template =
                         if let Some(&template) = self.imported_clause_templates.get(&clause) {
                             template
                         } else {
-                            let template = stor.import_clause(db_stor, clause);
+                            let template = query_storage.import_clause(database_storage, clause);
                             self.imported_clause_templates.insert(clause, template);
                             template
                         };
-                    similar_clauses.push(template);
+                    candidate_clauses.push(template);
                 }
             }
         }
 
         let old_len = self.nodes.len();
 
-        for clause in similar_clauses {
-            let head = stor.get_term(clause.head);
+        for clause in candidate_clauses {
+            let head = query_storage.get_term(clause.head);
 
-            if !stor.get_expr(node_expr).is_unifiable(head) {
+            if !query_storage.get_expr(node_expr).is_unifiable(head) {
                 continue;
             }
 
             let clause = Self::convert_var_into_temp(
                 clause,
-                stor,
-                &mut self.temp_var_buf,
-                &mut self.temp_var_int,
+                query_storage,
+                &mut self.fresh_var_map,
+                &mut self.next_fresh_var,
             );
-            if let Some(new_node) = self.unify_node_with_clause(node_index, clause, stor) {
+            if let Some(new_node) = self.unify_node_with_clause(node_index, clause, query_storage) {
                 self.nodes.push(new_node);
                 self.queue.push(self.nodes.len() - 1);
             }
@@ -218,7 +227,7 @@ impl Prover {
         // - Unification failure means the leftmost term should be false.
         // - But we need to consider the exhaustive search at the same time.
 
-        let expr = stor.get_expr(node_expr);
+        let expr = query_storage.get_expr(node_expr);
         let eval = self.nodes.len() > old_len;
         let mut need_apply = None;
 
@@ -233,7 +242,7 @@ impl Prover {
         }
 
         if let Some(to) = need_apply {
-            let mut expr = stor.get_expr_mut(node_expr);
+            let mut expr = query_storage.get_expr_mut(node_expr);
             let node_kind = match expr.apply_to_leftmost_term(to) {
                 ApplyResult::Expr => NodeKind::Expr(expr.id()),
                 ApplyResult::Complete(eval) => NodeKind::Leaf(eval),
@@ -263,7 +272,7 @@ impl Prover {
             },
         }
 
-        fn assume_leftmost_term(expr: ExprView<'_, Integer>, to: bool) -> AssumeResult {
+        fn assume_leftmost_term(expr: ExprView<'_, AtomId>, to: bool) -> AssumeResult {
             match expr.as_kind() {
                 ExprKind::Term(_) => AssumeResult::Complete {
                     eval: to,
@@ -314,7 +323,7 @@ impl Prover {
 
     /// Finds the nearest ancestor node that owns SLG table entry, then updates the entry and
     /// notifies all waiting consumers.
-    fn update_answer_and_notify(&mut self, node_index: usize, stor: &TermStorage<Integer>) {
+    fn update_answer_and_notify(&mut self, node_index: usize, query_storage: &TermStorage<AtomId>) {
         let tabled_ancestor = {
             let mut cur = node_index;
             loop {
@@ -333,15 +342,15 @@ impl Prover {
             let table_index = self.nodes[ancestor].table_owner.unwrap();
             let entry = &mut self.table[table_index];
             let all_answers_concrete = entry.variables().iter().all(|&var| {
-                if let Some(answer) = self.term_assigns.find(var) {
-                    !stor.get_term(answer).contains_variable()
+                if let Some(answer) = self.unification_assignments.find(var) {
+                    !query_storage.get_term(answer).contains_variable()
                 } else {
                     false
                 }
             });
 
-            if all_answers_concrete && !entry.has_answer(&self.term_assigns) {
-                entry.update_answer(&self.term_assigns);
+            if all_answers_concrete && !entry.has_answer(&self.unification_assignments) {
+                entry.update_answer(&self.unification_assignments);
                 for i in entry.consumer_nodes() {
                     if i != node_index {
                         self.queue.push(i);
@@ -360,41 +369,43 @@ impl Prover {
     //    times in a single proof-search path. Each use is considered a distinct clause.
     fn convert_var_into_temp(
         mut clause_id: ClauseId,
-        stor: &mut TermStorage<Integer>,
-        temp_var_buf: &mut Map<TermId, TermId>,
-        temp_var_int: &mut u32,
+        query_storage: &mut TermStorage<AtomId>,
+        fresh_var_map: &mut Map<TermId, TermId>,
+        next_fresh_var: &mut u32,
     ) -> ClauseId {
-        debug_assert!(temp_var_buf.is_empty());
+        debug_assert!(fresh_var_map.is_empty());
 
-        let mut f = |terms: &mut UniqueTermArray<Integer>, term_id: TermId| {
+        let mut f = |terms: &mut UniqueTermArray<AtomId>, term_id: TermId| {
             let term = terms.get_mut(term_id);
             if term.is_variable() {
                 let src = term.id();
 
-                temp_var_buf.entry(src).or_insert_with(|| {
+                fresh_var_map.entry(src).or_insert_with(|| {
                     let temp_term = Term {
-                        functor: Integer::temporary(*temp_var_int),
+                        functor: AtomId::temporary(*next_fresh_var),
                         args: [].into(),
                     };
-                    *temp_var_int += 1;
+                    *next_fresh_var += 1;
                     terms.insert(temp_term)
                 });
             }
         };
 
-        stor.get_term_mut(clause_id.head).with_terminal(&mut f);
+        query_storage
+            .get_term_mut(clause_id.head)
+            .with_terminal(&mut f);
 
         if let Some(body) = clause_id.body {
-            stor.get_expr_mut(body).with_terminal(&mut f);
+            query_storage.get_expr_mut(body).with_terminal(&mut f);
         }
 
-        for (src, dst) in temp_var_buf.drain() {
-            let mut head = stor.get_term_mut(clause_id.head);
+        for (src, dst) in fresh_var_map.drain() {
+            let mut head = query_storage.get_term_mut(clause_id.head);
             head.replace(src, dst);
             clause_id.head = head.id();
 
             if let Some(body) = clause_id.body {
-                let mut body = stor.get_expr_mut(body);
+                let mut body = query_storage.get_expr_mut(body);
                 body.replace_term(src, dst);
                 clause_id.body = Some(body.id());
             }
@@ -407,7 +418,7 @@ impl Prover {
         &mut self,
         node_index: usize,
         clause: ClauseId,
-        stor: &mut TermStorage<Integer>,
+        query_storage: &mut TermStorage<AtomId>,
     ) -> Option<Node> {
         debug_assert!(self.uni_op.ops.is_empty());
 
@@ -415,19 +426,20 @@ impl Prover {
             unreachable!()
         };
 
-        if !stor
+        if !query_storage
             .get_expr(node_expr)
             .leftmost_term()
-            .unify(stor.get_term(clause.head), &mut |op| {
+            .unify(query_storage.get_term(clause.head), &mut |op| {
                 self.uni_op.push_op(op)
             })
         {
             return None;
         }
-        let (node_expr, clause, uni_history) = self.uni_op.consume_ops(stor, node_expr, clause);
+        let (node_expr, clause, uni_history) =
+            self.uni_op.consume_ops(query_storage, node_expr, clause);
 
         if let Some(body) = clause.body {
-            let mut lhs = stor.get_expr_mut(node_expr);
+            let mut lhs = query_storage.get_expr_mut(node_expr);
             lhs.replace_leftmost_term(body);
             let node_kind = NodeKind::Expr(lhs.id());
             let node_parent = node_index;
@@ -435,7 +447,7 @@ impl Prover {
             return Some(node);
         }
 
-        let mut lhs = stor.get_expr_mut(node_expr);
+        let mut lhs = query_storage.get_expr_mut(node_expr);
         let node_kind = match lhs.apply_to_leftmost_term(true) {
             ApplyResult::Expr => NodeKind::Expr(lhs.id()),
             ApplyResult::Complete(eval) => NodeKind::Leaf(eval),
@@ -446,9 +458,9 @@ impl Prover {
     }
 
     /// Finds all from/to relations while traversing from the given node to the root, then adds the
-    /// relations to [`TermAssignments`].
+    /// relations to [`TermVariableBindings`].
     fn find_assignments(&mut self, node_index: usize) {
-        self.term_assigns.clear();
+        self.unification_assignments.clear();
 
         let mut cur_index = node_index;
         loop {
@@ -456,7 +468,7 @@ impl Prover {
             let range = node.uni_history.clone();
 
             for (from, to) in self.uni_op.get_record(range).iter().cloned() {
-                self.term_assigns.add(from, to);
+                self.unification_assignments.add(from, to);
             }
 
             if node.parent == cur_index {
@@ -468,25 +480,25 @@ impl Prover {
 
     /// Records the current proof result as a query answer if it is ground and not duplicated,
     /// then returns whether a new answer was recorded.
-    fn record_query_answer(&mut self, stor: &mut TermStorage<Integer>) -> bool {
+    fn record_query_answer(&mut self, query_storage: &mut TermStorage<AtomId>) -> bool {
         let mut answer = Vec::with_capacity(self.query_vars.len());
         for &var in &self.query_vars {
-            let Some(resolved) = self.materialize_assigned_term(var, stor) else {
+            let Some(resolved) = self.materialize_assigned_term(var, query_storage) else {
                 return false;
             };
             answer.push(resolved);
         }
 
         // No query vars -> empty iter -> all() returns true.
-        if self.query_answers.iter().all(|seen| seen != &answer) {
-            self.query_answers.push(answer);
+        if self.seen_answers.iter().all(|seen| seen != &answer) {
+            self.seen_answers.push(answer);
             true
         } else {
             false
         }
     }
 
-    /// Builds a fully substituted term for a query-side term from `term_assigns`.
+    /// Builds a fully substituted term for a query-side term from `unification_assignments`.
     ///
     /// Examples:
     ///
@@ -498,19 +510,19 @@ impl Prover {
     /// | `T = Vec(U)`        |   `T`    |  `None`  |
     ///
     /// This must materialize the whole term tree, not just rewrite functors in place. The returned
-    /// `TermId` always points to a ground term inserted into `stor`.
+    /// `TermId` always points to a ground term inserted into `query_storage`.
     fn materialize_assigned_term(
         &self,
         term_id: TermId,
-        stor: &mut TermStorage<Integer>,
+        query_storage: &mut TermStorage<AtomId>,
     ) -> Option<TermId> {
-        let term = stor.get_term(term_id);
+        let term = query_storage.get_term(term_id);
         if term.is_variable() {
-            let resolved = self.term_assigns.find(term_id)?;
+            let resolved = self.unification_assignments.find(term_id)?;
             if resolved == term_id {
                 return None;
             }
-            return self.materialize_assigned_term(resolved, stor);
+            return self.materialize_assigned_term(resolved, query_storage);
         }
 
         let functor = *term.functor();
@@ -518,13 +530,13 @@ impl Prover {
         let args = arg_ids
             .into_iter()
             .map(|arg_id| {
-                self.materialize_assigned_term(arg_id, stor)
-                    .map(|id| stor.get_term(id).deserialize())
+                self.materialize_assigned_term(arg_id, query_storage)
+                    .map(|id| query_storage.get_term(id).deserialize())
             })
             .collect::<Option<Vec<_>>>()?;
 
         let materialized = Term { functor, args };
-        Some(stor.insert_term(materialized))
+        Some(query_storage.insert_term(materialized))
     }
 }
 
@@ -573,7 +585,7 @@ impl UnificationOperator {
     #[must_use]
     fn consume_ops(
         &mut self,
-        stor: &mut TermStorage<Integer>,
+        query_storage: &mut TermStorage<AtomId>,
         mut left: ExprId,
         mut right: ClauseId,
     ) -> (ExprId, ClauseId, Range<usize>) {
@@ -582,7 +594,7 @@ impl UnificationOperator {
         for op in self.ops.drain(..) {
             match op {
                 UnifyOp::Left { from, to } => {
-                    let mut expr = stor.get_expr_mut(left);
+                    let mut expr = query_storage.get_expr_mut(left);
                     expr.replace_term(from, to);
                     left = expr.id();
 
@@ -590,7 +602,7 @@ impl UnificationOperator {
                 }
                 UnifyOp::Right { from, to } => {
                     if let Some(right_body) = right.body {
-                        let mut expr = stor.get_expr_mut(right_body);
+                        let mut expr = query_storage.get_expr_mut(right_body);
                         expr.replace_term(from, to);
                         right.body = Some(expr.id());
 
@@ -678,7 +690,7 @@ enum NodeKind {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct TermAssignments {
+pub(crate) struct TermVariableBindings {
     /// Union-find from/to relations.
     ///
     /// # Examples
@@ -687,7 +699,7 @@ pub(crate) struct TermAssignments {
     relations: Vec<TermId>,
 }
 
-impl TermAssignments {
+impl TermVariableBindings {
     pub(crate) fn find(&self, from: TermId) -> Option<TermId> {
         let to = *self.relations.get(from.0)?;
         if from == to {
@@ -743,49 +755,50 @@ enum UnifyOp {
 }
 
 /// Proof-search context for a query.
-pub struct ProveCx<'a, T: Atom> {
-    prover: Prover,
-    clauses: &'a IndexMap<Predicate<Integer>, Vec<ClauseId>>,
-    table_clauses: &'a IndexSet<Predicate<Integer>>,
-    db_stor: &'a TermStorage<Integer>,
-    stor: TermStorage<Integer>,
-    nimap: QueryNameIntMap<'a, T>,
+pub struct QueryCx<'a, T: Atom> {
+    proof_engine: ProofEngine,
+    clauses: &'a IndexMap<Predicate<AtomId>, Vec<ClauseId>>,
+    tabled_predicates: &'a IndexSet<Predicate<AtomId>>,
+    database_storage: &'a TermStorage<AtomId>,
+    query_storage: TermStorage<AtomId>,
+    name_interner: QueryNameInterner<'a, T>,
 }
 
-impl<'a, T: Atom> ProveCx<'a, T> {
+impl<'a, T: Atom> QueryCx<'a, T> {
     fn new(
-        mut prover: Prover,
+        mut proof_engine: ProofEngine,
         query: Expr<T>,
-        clauses: &'a IndexMap<Predicate<Integer>, Vec<ClauseId>>,
-        table_clauses: &'a IndexSet<Predicate<Integer>>,
-        db_stor: &'a TermStorage<Integer>,
-        db_nimap: &'a NameIntMap<T>,
+        clauses: &'a IndexMap<Predicate<AtomId>, Vec<ClauseId>>,
+        tabled_predicates: &'a IndexSet<Predicate<AtomId>>,
+        database_storage: &'a TermStorage<AtomId>,
+        database_name_interner: &'a NameInterner<T>,
     ) -> Self {
-        prover.clear();
+        proof_engine.clear();
 
-        let mut nimap = QueryNameIntMap::new(db_nimap);
-        let query = query.map(&mut |name| nimap.name_to_int(name));
+        let mut name_interner = QueryNameInterner::new(database_name_interner);
+        let query = query.map(&mut |name| name_interner.intern(name));
 
-        let mut stor = TermStorage::default();
-        prover.query = stor.insert_expr(query);
+        let mut query_storage = TermStorage::default();
+        proof_engine.query = query_storage.insert_expr(query);
 
-        stor.get_expr(prover.query)
-            .with_term(&mut |term: TermView<'_, Integer>| {
-                term.with_variable(|term| prover.query_vars.push(term.id));
+        query_storage
+            .get_expr(proof_engine.query)
+            .with_term(&mut |term: TermView<'_, AtomId>| {
+                term.with_variable(|term| proof_engine.query_vars.push(term.id));
             });
 
-        let node_kind = NodeKind::Expr(prover.query);
-        let node_parent = prover.nodes.len();
-        prover.nodes.push(Node::new(node_kind, node_parent));
-        prover.queue.push(0);
+        let node_kind = NodeKind::Expr(proof_engine.query);
+        let node_parent = proof_engine.nodes.len();
+        proof_engine.nodes.push(Node::new(node_kind, node_parent));
+        proof_engine.queue.push(0);
 
         Self {
-            prover,
+            proof_engine,
             clauses,
-            table_clauses,
-            db_stor,
-            stor,
-            nimap,
+            tabled_predicates,
+            database_storage,
+            query_storage,
+            name_interner,
         }
     }
 
@@ -813,25 +826,29 @@ impl<'a, T: Atom> ProveCx<'a, T> {
     /// answers.sort_unstable();
     /// assert_eq!(answers, vec!["bob", "carol"]);
     /// ```
-    pub fn prove_next(&mut self) -> Option<EvalView<'_, T>> {
-        while let Some(node_index) = self.prover.queue.pop() {
-            if let Some(proof_result) = self.prover.evaluate_node(
+    pub fn prove_next(&mut self) -> Option<AnswerView<'_, T>> {
+        while let Some(node_index) = self.proof_engine.queue.pop() {
+            if let Some(proof_result) = self.proof_engine.evaluate_node(
                 node_index,
                 self.clauses,
-                self.table_clauses,
-                self.db_stor,
-                &mut self.stor,
+                self.tabled_predicates,
+                self.database_storage,
+                &mut self.query_storage,
             ) {
-                // Return Some(EvalView) only if the result is TRUE and yielded a new ground
+                // Return Some(AnswerView) only if the result is TRUE and yielded a new ground
                 // query answer.
-                if proof_result && self.prover.record_query_answer(&mut self.stor) {
-                    return Some(EvalView {
-                        query_vars: &self.prover.query_vars,
-                        terms: &self.stor.terms.buf,
-                        term_assigns: &self.prover.term_assigns,
-                        nimap: &self.nimap,
+                if proof_result
+                    && self
+                        .proof_engine
+                        .record_query_answer(&mut self.query_storage)
+                {
+                    return Some(AnswerView {
+                        query_vars: &self.proof_engine.query_vars,
+                        terms: &self.query_storage.terms.buf,
+                        unification_assignments: &self.proof_engine.unification_assignments,
+                        name_interner: &self.name_interner,
                         start: 0,
-                        end: self.prover.query_vars.len(),
+                        end: self.proof_engine.query_vars.len(),
                     });
                 }
             }
@@ -860,71 +877,71 @@ impl<'a, T: Atom> ProveCx<'a, T> {
 }
 
 /// Name mapping for a query: database names are borrowed, query-only names are local.
-struct QueryNameIntMap<'a, T> {
-    database: &'a NameIntMap<T>,
-    local: NameIntMap<T>,
+struct QueryNameInterner<'a, T> {
+    database: &'a NameInterner<T>,
+    local: NameInterner<T>,
 }
 
-impl<'a, T> QueryNameIntMap<'a, T> {
-    fn new(database: &'a NameIntMap<T>) -> Self {
+impl<'a, T> QueryNameInterner<'a, T> {
+    fn new(database: &'a NameInterner<T>) -> Self {
         Self {
             database,
-            local: NameIntMap {
-                name2int: IndexMap::default(),
-                int2name: IndexMap::default(),
-                next_int: database.next_int,
+            local: NameInterner {
+                name_to_id: IndexMap::default(),
+                id_to_name: IndexMap::default(),
+                next_id: database.next_id,
             },
         }
     }
 
-    fn get_name(&self, int: &Integer) -> Option<&T> {
+    fn get_name(&self, atom_id: &AtomId) -> Option<&T> {
         self.database
-            .get_name(int)
-            .or_else(|| self.local.get_name(int))
+            .get_name(atom_id)
+            .or_else(|| self.local.get_name(atom_id))
     }
 }
 
-impl<T: Atom> QueryNameIntMap<'_, T> {
-    fn name_to_int(&mut self, name: T) -> Integer {
-        if let Some(int) = self.database.name2int.get(&name) {
-            *int
+impl<T: Atom> QueryNameInterner<'_, T> {
+    fn intern(&mut self, name: T) -> AtomId {
+        if let Some(atom_id) = self.database.name_to_id.get(&name) {
+            *atom_id
         } else {
-            self.local.name_to_int(name)
+            self.local.intern(name)
         }
     }
 }
 
 /// View over the assignments produced by one proof result.
-pub struct EvalView<'a, T> {
+pub struct AnswerView<'a, T> {
     query_vars: &'a [TermId],
-    terms: &'a [TermElem<Integer>],
-    term_assigns: &'a TermAssignments,
-    nimap: &'a QueryNameIntMap<'a, T>,
+    terms: &'a [TermElem<AtomId>],
+    unification_assignments: &'a TermVariableBindings,
+    name_interner: &'a QueryNameInterner<'a, T>,
     /// Inclusive
     start: usize,
     /// Exclusive
     end: usize,
 }
 
-impl<T> EvalView<'_, T> {
+impl<T> AnswerView<'_, T> {
     const fn len(&self) -> usize {
         self.end - self.start
     }
 }
 
-impl<'a, T> Iterator for EvalView<'a, T> {
-    type Item = Assignment<'a, T>;
+impl<'a, T> Iterator for AnswerView<'a, T> {
+    type Item = VariableBinding<'a, T>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.start < self.end {
             let from = self.query_vars[self.start];
             self.start += 1;
 
-            Some(Assignment {
+            Some(VariableBinding {
                 buf: self.terms,
                 from,
-                term_assigns: self.term_assigns,
-                nimap: self.nimap,
+                unification_assignments: self.unification_assignments,
+                name_interner: self.name_interner,
             })
         } else {
             None
@@ -937,23 +954,23 @@ impl<'a, T> Iterator for EvalView<'a, T> {
     }
 }
 
-impl<T> ExactSizeIterator for EvalView<'_, T> {
+impl<T> ExactSizeIterator for AnswerView<'_, T> {
     fn len(&self) -> usize {
         <Self>::len(self)
     }
 }
 
-impl<T> iter::FusedIterator for EvalView<'_, T> {}
+impl<T> iter::FusedIterator for AnswerView<'_, T> {}
 
 /// A single variable assignment from a proof result.
-pub struct Assignment<'a, T> {
-    buf: &'a [TermElem<Integer>],
+pub struct VariableBinding<'a, T> {
+    buf: &'a [TermElem<AtomId>],
     from: TermId,
-    term_assigns: &'a TermAssignments,
-    nimap: &'a QueryNameIntMap<'a, T>,
+    unification_assignments: &'a TermVariableBindings,
+    name_interner: &'a QueryNameInterner<'a, T>,
 }
 
-impl<'a, T: 'a> Assignment<'a, T> {
+impl<'a, T: 'a> VariableBinding<'a, T> {
     /// Returns the left-hand-side variable name of the assignment.
     ///
     /// Note that the assignment's left-hand side is always a variable.
@@ -975,27 +992,27 @@ impl<'a, T: 'a> Assignment<'a, T> {
     /// assert_eq!(assignment.get_lhs_variable().as_ref(), "$Who");
     /// ```
     pub fn get_lhs_variable(&self) -> &T {
-        let int = self.lhs_view().find_variable().unwrap();
-        self.nimap.get_name(&int).unwrap()
+        let atom_id = self.lhs_view().find_variable().unwrap();
+        self.name_interner.get_name(&atom_id).unwrap()
     }
 
-    const fn lhs_view(&self) -> TermView<'_, Integer> {
+    const fn lhs_view(&self) -> TermView<'_, AtomId> {
         TermView {
             buf: self.buf,
             id: self.from,
         }
     }
 
-    const fn rhs_view(&self) -> TermDeepView<'_, Integer> {
+    const fn rhs_view(&self) -> TermDeepView<'_, AtomId> {
         TermDeepView {
             buf: self.buf,
-            term_assigns: self.term_assigns,
+            unification_assignments: self.unification_assignments,
             id: self.from,
         }
     }
 }
 
-impl<'a, T: Atom + 'a> Assignment<'a, T> {
+impl<'a, T: Atom + 'a> VariableBinding<'a, T> {
     /// Creates the left-hand-side term of the assignment.
     ///
     /// Creating a term may allocate memory.
@@ -1017,7 +1034,7 @@ impl<'a, T: Atom + 'a> Assignment<'a, T> {
     /// assert_eq!(assignment.lhs().to_string(), "$Who");
     /// ```
     pub fn lhs(&self) -> Term<T> {
-        Self::term_view_to_term(self.lhs_view(), self.nimap)
+        Self::term_view_to_term(self.lhs_view(), self.name_interner)
     }
 
     /// Creates the right-hand-side term of the assignment.
@@ -1041,50 +1058,53 @@ impl<'a, T: Atom + 'a> Assignment<'a, T> {
     /// assert_eq!(assignment.rhs().to_string(), "bob");
     /// ```
     pub fn rhs(&self) -> Term<T> {
-        Self::term_deep_view_to_term(self.rhs_view(), self.nimap)
+        Self::term_deep_view_to_term(self.rhs_view(), self.name_interner)
     }
 
-    fn term_view_to_term(view: TermView<'_, Integer>, nimap: &QueryNameIntMap<'_, T>) -> Term<T> {
+    fn term_view_to_term(
+        view: TermView<'_, AtomId>,
+        name_interner: &QueryNameInterner<'_, T>,
+    ) -> Term<T> {
         let functor = view.functor();
         let args = view.args();
 
-        let functor = if let Some(name) = nimap.get_name(functor) {
+        let functor = if let Some(name) = name_interner.get_name(functor) {
             name.clone()
         } else {
-            unreachable!("integer {:?} has no name mapping", functor)
+            unreachable!("atom id {:?} has no name mapping", functor)
         };
 
         let args = args
             .into_iter()
-            .map(|arg| Self::term_view_to_term(arg, nimap))
+            .map(|arg| Self::term_view_to_term(arg, name_interner))
             .collect();
 
         Term { functor, args }
     }
 
     fn term_deep_view_to_term(
-        view: TermDeepView<'_, Integer>,
-        nimap: &QueryNameIntMap<'_, T>,
+        view: TermDeepView<'_, AtomId>,
+        name_interner: &QueryNameInterner<'_, T>,
     ) -> Term<T> {
         let functor = view.functor();
         let args = view.args();
 
-        let functor = if let Some(name) = nimap.get_name(functor) {
+        let functor = if let Some(name) = name_interner.get_name(functor) {
             name.clone()
         } else {
-            unreachable!("integer {:?} has no name mapping", functor)
+            unreachable!("atom id {:?} has no name mapping", functor)
         };
 
         let args = args
             .into_iter()
-            .map(|arg| Self::term_deep_view_to_term(arg, nimap))
+            .map(|arg| Self::term_deep_view_to_term(arg, name_interner))
             .collect();
 
         Term { functor, args }
     }
 }
 
-impl<T: Atom + Display> Display for Assignment<'_, T> {
+impl<T: Atom + Display> Display for VariableBinding<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         Display::fmt(&self.lhs(), f)?;
 
@@ -1094,17 +1114,17 @@ impl<T: Atom + Display> Display for Assignment<'_, T> {
     }
 }
 
-impl<T: Atom + Debug> Debug for Assignment<'_, T> {
+impl<T: Atom + Debug> Debug for VariableBinding<'_, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Assignment")
+        f.debug_struct("VariableBinding")
             .field("lhs", &self.lhs())
             .field("rhs", &self.rhs())
             .finish()
     }
 }
 
-impl ExprView<'_, Integer> {
-    fn is_unifiable(&self, other: TermView<'_, Integer>) -> bool {
+impl ExprView<'_, AtomId> {
+    fn is_unifiable(&self, other: TermView<'_, AtomId>) -> bool {
         match self.as_kind() {
             ExprKind::Term(term) => term.is_unifiable(other),
             ExprKind::Not(inner) => inner.is_unifiable(other),
@@ -1125,7 +1145,7 @@ impl ExprView<'_, Integer> {
     }
 }
 
-impl TermView<'_, Integer> {
+impl TermView<'_, AtomId> {
     fn unify<F: FnMut(UnifyOp)>(self, other: Self, f: &mut F) -> bool {
         if self.is_variable() {
             f(UnifyOp::Left {
@@ -1172,17 +1192,17 @@ impl TermView<'_, Integer> {
     }
 }
 
-impl TermViewMut<'_, Integer> {
+impl TermViewMut<'_, AtomId> {
     fn is_variable(&self) -> bool {
         self.arity() == 0 && self.functor().is_variable()
     }
 }
 
-/// Internal integer representation of an atom.
+/// Internal identifier for an atom.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Integer(u32);
+pub struct AtomId(u32);
 
-impl Integer {
+impl AtomId {
     const VAR_FLAG: u32 = 0x1 << 31;
     const TEMPORARY_FLAG: u32 = 0x1 << 30;
 
@@ -1193,16 +1213,16 @@ impl Integer {
         Self(index)
     }
 
-    pub(crate) fn variable(int: u32) -> Self {
+    pub(crate) fn variable(index: u32) -> Self {
         let mask = Self::VAR_FLAG;
-        debug_assert_eq!(int & mask, 0);
-        Self(int | mask)
+        debug_assert_eq!(index & mask, 0);
+        Self(index | mask)
     }
 
-    pub(crate) fn temporary(int: u32) -> Self {
+    pub(crate) fn temporary(index: u32) -> Self {
         let mask = Self::VAR_FLAG | Self::TEMPORARY_FLAG;
-        debug_assert_eq!(int & mask, 0);
-        Self(int | mask)
+        debug_assert_eq!(index & mask, 0);
+        Self(index | mask)
     }
 
     pub(crate) const fn is_temporary_variable(self) -> bool {
@@ -1211,13 +1231,13 @@ impl Integer {
     }
 }
 
-impl Atom for Integer {
+impl Atom for AtomId {
     fn is_variable(&self) -> bool {
         (Self::VAR_FLAG & self.0) == Self::VAR_FLAG
     }
 }
 
-impl Debug for Integer {
+impl Debug for AtomId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mask: u32 = Self::VAR_FLAG | Self::TEMPORARY_FLAG;
         let index = !mask & self.0;
@@ -1232,7 +1252,7 @@ impl Debug for Integer {
     }
 }
 
-impl ops::AddAssign<u32> for Integer {
+impl ops::AddAssign<u32> for AtomId {
     fn add_assign(&mut self, rhs: u32) {
         self.0 += rhs;
     }
@@ -1242,40 +1262,40 @@ impl ops::AddAssign<u32> for Integer {
 ///
 /// Auto-generated names such as temporary variables are not stored here.
 #[derive(Debug)]
-pub(crate) struct NameIntMap<T> {
-    name2int: IndexMap<T, Integer>,
-    int2name: IndexMap<Integer, T>,
-    next_int: u32,
+pub(crate) struct NameInterner<T> {
+    name_to_id: IndexMap<T, AtomId>,
+    id_to_name: IndexMap<AtomId, T>,
+    next_id: u32,
 }
 
-impl<T> NameIntMap<T> {
-    pub(crate) fn get_name(&self, int: &Integer) -> Option<&T> {
-        self.int2name.get(int)
+impl<T> NameInterner<T> {
+    pub(crate) fn get_name(&self, atom_id: &AtomId) -> Option<&T> {
+        self.id_to_name.get(atom_id)
     }
 }
 
-impl<T: Atom> NameIntMap<T> {
-    pub(crate) fn name_to_int(&mut self, name: T) -> Integer {
-        if let Some(int) = self.name2int.get(&name) {
-            *int
+impl<T: Atom> NameInterner<T> {
+    pub(crate) fn intern(&mut self, name: T) -> AtomId {
+        if let Some(atom_id) = self.name_to_id.get(&name) {
+            *atom_id
         } else {
-            let int = Integer::from_value(&name, self.next_int);
+            let atom_id = AtomId::from_value(&name, self.next_id);
 
-            self.name2int.insert(name.clone(), int);
-            self.int2name.insert(int, name);
+            self.name_to_id.insert(name.clone(), atom_id);
+            self.id_to_name.insert(atom_id, name);
 
-            self.next_int += 1;
-            int
+            self.next_id += 1;
+            atom_id
         }
     }
 }
 
-impl<T> Default for NameIntMap<T> {
+impl<T> Default for NameInterner<T> {
     fn default() -> Self {
         Self {
-            name2int: IndexMap::default(),
-            int2name: IndexMap::default(),
-            next_int: 0,
+            name_to_id: IndexMap::default(),
+            id_to_name: IndexMap::default(),
+            next_id: 0,
         }
     }
 }
@@ -1284,19 +1304,25 @@ pub(crate) mod format {
     use super::*;
 
     pub struct NamedTermView<'a, T> {
-        view: TermView<'a, Integer>,
-        nimap: &'a NameIntMap<T>,
+        view: TermView<'a, AtomId>,
+        name_interner: &'a NameInterner<T>,
     }
 
     impl<'a, T> NamedTermView<'a, T> {
-        pub(crate) const fn new(view: TermView<'a, Integer>, nimap: &'a NameIntMap<T>) -> Self {
-            Self { view, nimap }
+        pub(crate) const fn new(
+            view: TermView<'a, AtomId>,
+            name_interner: &'a NameInterner<T>,
+        ) -> Self {
+            Self {
+                view,
+                name_interner,
+            }
         }
 
         fn args<'s>(&'s self) -> impl Iterator<Item = NamedTermView<'a, T>> + 's {
             self.view.args().map(|arg| Self {
                 view: arg,
-                nimap: self.nimap,
+                name_interner: self.name_interner,
             })
         }
     }
@@ -1320,7 +1346,7 @@ pub(crate) mod format {
         /// ```
         pub fn is(&self, term: &Term<T>) -> bool {
             let functor = self.view.functor();
-            let Some(functor) = self.nimap.get_name(functor) else {
+            let Some(functor) = self.name_interner.get_name(functor) else {
                 return false;
             };
 
@@ -1358,18 +1384,21 @@ pub(crate) mod format {
 
     impl<'a, T: Display> Display for NamedTermView<'a, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let Self { view, nimap } = self;
+            let Self {
+                view,
+                name_interner,
+            } = self;
 
             let functor = view.functor();
             let args = view.args();
             let num_args = args.len();
 
-            write_int(functor, nimap, f)?;
+            write_atom_id(functor, name_interner, f)?;
 
             if num_args > 0 {
                 f.write_char('(')?;
                 for (i, arg) in args.enumerate() {
-                    fmt::Display::fmt(&Self::new(arg, nimap), f)?;
+                    fmt::Display::fmt(&Self::new(arg, name_interner), f)?;
                     if i + 1 < num_args {
                         f.write_str(", ")?;
                     }
@@ -1382,20 +1411,23 @@ pub(crate) mod format {
 
     impl<'a, T: Debug> Debug for NamedTermView<'a, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let Self { view, nimap } = self;
+            let Self {
+                view,
+                name_interner,
+            } = self;
 
             let functor = view.functor();
             let args = view.args();
             let num_args = args.len();
 
             if num_args == 0 {
-                if let Some(name) = nimap.get_name(functor) {
+                if let Some(name) = name_interner.get_name(functor) {
                     fmt::Debug::fmt(name, f)
                 } else {
                     fmt::Debug::fmt(functor, f)
                 }
             } else {
-                let name_str = if let Some(name) = nimap.get_name(functor) {
+                let name_str = if let Some(name) = name_interner.get_name(functor) {
                     format!("{:?}", name)
                 } else {
                     format!("{:?}", functor)
@@ -1403,7 +1435,7 @@ pub(crate) mod format {
                 let mut d = f.debug_tuple(&name_str);
 
                 for arg in args {
-                    d.field(&Self::new(arg, nimap));
+                    d.field(&Self::new(arg, name_interner));
                 }
                 d.finish()
             }
@@ -1411,13 +1443,19 @@ pub(crate) mod format {
     }
 
     pub struct NamedExprView<'a, T> {
-        view: ExprView<'a, Integer>,
-        nimap: &'a NameIntMap<T>,
+        view: ExprView<'a, AtomId>,
+        name_interner: &'a NameInterner<T>,
     }
 
     impl<'a, T> NamedExprView<'a, T> {
-        pub(crate) const fn new(view: ExprView<'a, Integer>, nimap: &'a NameIntMap<T>) -> Self {
-            Self { view, nimap }
+        pub(crate) const fn new(
+            view: ExprView<'a, AtomId>,
+            name_interner: &'a NameInterner<T>,
+        ) -> Self {
+            Self {
+                view,
+                name_interner,
+            }
         }
     }
 
@@ -1442,18 +1480,18 @@ pub(crate) mod format {
             match self.view.as_kind() {
                 ExprKind::Term(view) => NamedTermView {
                     view,
-                    nimap: self.nimap,
+                    name_interner: self.name_interner,
                 }
                 .contains(term),
                 ExprKind::Not(view) => NamedExprView {
                     view,
-                    nimap: self.nimap,
+                    name_interner: self.name_interner,
                 }
                 .contains_term(term),
                 ExprKind::And(args) | ExprKind::Or(args) => args.into_iter().any(|view| {
                     NamedExprView {
                         view,
-                        nimap: self.nimap,
+                        name_interner: self.name_interner,
                     }
                     .contains_term(term)
                 }),
@@ -1463,18 +1501,27 @@ pub(crate) mod format {
 
     impl<'a, T: Display> Display for NamedExprView<'a, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let Self { view, nimap } = self;
+            let Self {
+                view,
+                name_interner,
+            } = self;
 
             match view.as_kind() {
-                ExprKind::Term(term) => fmt::Display::fmt(&NamedTermView { view: term, nimap }, f)?,
+                ExprKind::Term(term) => fmt::Display::fmt(
+                    &NamedTermView {
+                        view: term,
+                        name_interner,
+                    },
+                    f,
+                )?,
                 ExprKind::Not(inner) => {
                     f.write_str("\\+ ")?;
                     if matches!(inner.as_kind(), ExprKind::And(_) | ExprKind::Or(_)) {
                         f.write_char('(')?;
-                        fmt::Display::fmt(&Self::new(inner, nimap), f)?;
+                        fmt::Display::fmt(&Self::new(inner, name_interner), f)?;
                         f.write_char(')')?;
                     } else {
-                        fmt::Display::fmt(&Self::new(inner, nimap), f)?;
+                        fmt::Display::fmt(&Self::new(inner, name_interner), f)?;
                     }
                 }
                 ExprKind::And(args) => {
@@ -1482,10 +1529,10 @@ pub(crate) mod format {
                     for (i, arg) in args.enumerate() {
                         if matches!(arg.as_kind(), ExprKind::Or(_)) {
                             f.write_char('(')?;
-                            fmt::Display::fmt(&Self::new(arg, nimap), f)?;
+                            fmt::Display::fmt(&Self::new(arg, name_interner), f)?;
                             f.write_char(')')?;
                         } else {
-                            fmt::Display::fmt(&Self::new(arg, nimap), f)?;
+                            fmt::Display::fmt(&Self::new(arg, name_interner), f)?;
                         }
                         if i + 1 < num_args {
                             f.write_str(", ")?;
@@ -1495,7 +1542,7 @@ pub(crate) mod format {
                 ExprKind::Or(args) => {
                     let num_args = args.len();
                     for (i, arg) in args.enumerate() {
-                        fmt::Display::fmt(&Self::new(arg, nimap), f)?;
+                        fmt::Display::fmt(&Self::new(arg, name_interner), f)?;
                         if i + 1 < num_args {
                             f.write_str("; ")?;
                         }
@@ -1508,25 +1555,30 @@ pub(crate) mod format {
 
     impl<'a, T: Debug> Debug for NamedExprView<'a, T> {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            let Self { view, nimap } = self;
+            let Self {
+                view,
+                name_interner,
+            } = self;
 
             match view.as_kind() {
-                ExprKind::Term(term) => fmt::Debug::fmt(&NamedTermView::new(term, nimap), f),
+                ExprKind::Term(term) => {
+                    fmt::Debug::fmt(&NamedTermView::new(term, name_interner), f)
+                }
                 ExprKind::Not(inner) => f
                     .debug_tuple("Not")
-                    .field(&NamedExprView::new(inner, nimap))
+                    .field(&NamedExprView::new(inner, name_interner))
                     .finish(),
                 ExprKind::And(args) => {
                     let mut d = f.debug_tuple("And");
                     for arg in args {
-                        d.field(&NamedExprView::new(arg, nimap));
+                        d.field(&NamedExprView::new(arg, name_interner));
                     }
                     d.finish()
                 }
                 ExprKind::Or(args) => {
                     let mut d = f.debug_tuple("Or");
                     for arg in args {
-                        d.field(&NamedExprView::new(arg, nimap));
+                        d.field(&NamedExprView::new(arg, name_interner));
                     }
                     d.finish()
                 }
@@ -1534,15 +1586,15 @@ pub(crate) mod format {
         }
     }
 
-    fn write_int<T: fmt::Display>(
-        int: &Integer,
-        nimap: &NameIntMap<T>,
+    fn write_atom_id<T: fmt::Display>(
+        atom_id: &AtomId,
+        name_interner: &NameInterner<T>,
         f: &mut fmt::Formatter<'_>,
     ) -> fmt::Result {
-        if let Some(name) = nimap.get_name(int) {
+        if let Some(name) = name_interner.get_name(atom_id) {
             fmt::Display::fmt(name, f)
         } else {
-            fmt::Debug::fmt(int, f)
+            fmt::Debug::fmt(atom_id, f)
         }
     }
 }

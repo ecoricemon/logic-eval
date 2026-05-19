@@ -1,4 +1,6 @@
-use crate::{prove::prover::TermAssignments, Atom, Expr, PassThroughIndexMap, Predicate, Term};
+use crate::{
+    prove::proof_engine::TermVariableBindings, Atom, Expr, PassThroughIndexMap, Predicate, Term,
+};
 use fxhash::FxHasher;
 use std::{
     hash::{Hash, Hasher},
@@ -1077,7 +1079,7 @@ impl<T> iter::FusedIterator for TermViewArgs<'_, T> {}
 #[derive(Debug, Clone)]
 pub struct TermDeepView<'a, T> {
     pub(crate) buf: &'a [TermElem<T>],
-    pub(crate) term_assigns: &'a TermAssignments,
+    pub(crate) unification_assignments: &'a TermVariableBindings,
     pub(crate) id: TermId,
 }
 
@@ -1107,17 +1109,20 @@ impl<'a, T> TermDeepView<'a, T> {
         let end = start + view.arity() as usize;
         TermDeepViewArgs {
             buf: view.buf,
-            term_assigns: view.term_assigns,
+            unification_assignments: view.unification_assignments,
             start,
             end,
         }
     }
 
     pub(crate) fn jump(&self) -> Self {
-        let root = self.term_assigns.find(self.id).unwrap_or(self.id);
+        let root = self
+            .unification_assignments
+            .find(self.id)
+            .unwrap_or(self.id);
         Self {
             buf: self.buf,
-            term_assigns: self.term_assigns,
+            unification_assignments: self.unification_assignments,
             id: root,
         }
     }
@@ -1126,7 +1131,7 @@ impl<'a, T> TermDeepView<'a, T> {
 #[derive(Clone)]
 pub(crate) struct TermDeepViewArgs<'a, T> {
     buf: &'a [TermElem<T>],
-    term_assigns: &'a TermAssignments,
+    unification_assignments: &'a TermVariableBindings,
     /// Inclusive
     start: TermId,
     /// Exclusive
@@ -1150,7 +1155,7 @@ impl<'a, T> Iterator for TermDeepViewArgs<'a, T> {
             self.start += 1;
             Some(TermDeepView {
                 buf: self.buf,
-                term_assigns: self.term_assigns,
+                unification_assignments: self.unification_assignments,
                 id,
             })
         } else {

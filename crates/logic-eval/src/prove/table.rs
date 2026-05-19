@@ -1,9 +1,9 @@
 use super::{
     canonical::CanonicalTermId,
-    prover::Integer,
+    proof_engine::AtomId,
     repr::{TermId, TermView},
 };
-use crate::{prove::prover::TermAssignments, Map};
+use crate::{prove::proof_engine::TermVariableBindings, Map};
 use core::ops::{Index, IndexMut};
 
 #[derive(Debug, Default)]
@@ -76,7 +76,7 @@ impl TableEntry {
     /// - `view` is just a variable, which does not make sense for tabling. Use a term such as
     ///   `f(X)` instead.
     /// - `view` does not contain any variables, so it does not need tabling.
-    pub(crate) fn from_term_view(view: &TermView<'_, Integer>) -> Option<Self> {
+    pub(crate) fn from_term_view(view: &TermView<'_, AtomId>) -> Option<Self> {
         if view.is_variable() || !view.contains_variable() {
             return None;
         }
@@ -97,12 +97,12 @@ impl TableEntry {
     }
 
     /// See [`AnswerMatrix::update`].
-    pub(crate) fn update_answer(&mut self, term_assigns: &TermAssignments) {
-        self.seen.update(term_assigns);
+    pub(crate) fn update_answer(&mut self, unification_assignments: &TermVariableBindings) {
+        self.seen.update(unification_assignments);
     }
 
-    pub(crate) fn has_answer(&self, term_assigns: &TermAssignments) -> bool {
-        self.seen.has_answer(term_assigns)
+    pub(crate) fn has_answer(&self, unification_assignments: &TermVariableBindings) -> bool {
+        self.seen.has_answer(unification_assignments)
     }
 
     pub(crate) fn consumer_nodes(&self) -> impl Iterator<Item = usize> + '_ {
@@ -177,25 +177,25 @@ impl AnswerMatrix {
         }
     }
 
-    /// This method assumes that `term_assigns` has ground answers for this entry's variables.
-    fn update(&mut self, term_assigns: &TermAssignments) {
+    /// This method assumes that `unification_assignments` has ground answers for this entry's variables.
+    fn update(&mut self, unification_assignments: &TermVariableBindings) {
         self.elems.reserve_exact(self.rows);
         for r in 0..self.rows {
             let var = self.elems[r];
-            let answer = term_assigns.find(var).unwrap();
+            let answer = unification_assignments.find(var).unwrap();
             self.elems.push(answer);
         }
         self.cols += 1;
     }
 
-    fn has_answer(&self, term_assigns: &TermAssignments) -> bool {
+    fn has_answer(&self, unification_assignments: &TermVariableBindings) -> bool {
         let vars = self.column(0);
         for col_idx in 1..self.cols {
             let answers = self.column(col_idx);
             if vars
                 .iter()
                 .zip(answers)
-                .all(|(var, answer)| term_assigns.find(*var) == Some(*answer))
+                .all(|(var, answer)| unification_assignments.find(*var) == Some(*answer))
             {
                 return true;
             }

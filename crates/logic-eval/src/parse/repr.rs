@@ -1,5 +1,5 @@
 use crate::{
-    prove::{canonical as canon, prover::Integer},
+    prove::{canonical as canon, proof_engine::AtomId},
     Atom,
 };
 use std::{
@@ -124,7 +124,7 @@ impl<T> Clause<T> {
     }
 }
 
-impl Clause<Integer> {
+impl Clause<AtomId> {
     /// Returns `true` if the clause needs SLG resolution (tabling).
     ///
     /// If a clause has left or mid recursion, it must be handled by tabling.
@@ -145,7 +145,7 @@ impl Clause<Integer> {
 
         // === Internal helper functions ===
 
-        fn helper(expr: &Expr<Integer>, head: &Term<Integer>) -> bool {
+        fn helper(expr: &Expr<AtomId>, head: &Term<AtomId>) -> bool {
             match expr {
                 Expr::Term(term) => term == head,
                 Expr::Not(arg) => helper(arg, head),
