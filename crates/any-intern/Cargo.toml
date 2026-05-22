@@ -3,11 +3,11 @@ name = "any-intern"
 version = "0.1.5"
 edition = "2021"
 rust-version = "1.65.0"
-description = "An interner for various types"
 readme = "README.md"
 repository = "https://github.com/ecoricemon/logic-eval"
 license = "Apache-2.0 OR MIT"
-keywords = ["intern"]
+description = "Flexible value interning with typed, type-erased, and dropless arena storage"
+keywords = ["interning", "arena", "deduplication"]
 
 [dependencies]
 bumpalo = { workspace = true }

@@ -3,11 +3,11 @@ name = "logic-eval"
 version = "0.2.0"
 edition = "2021"
 rust-version = "1.65.0"
-description = "A prolog-like logic evaluator"
 readme = "README.md"
 repository = "https://github.com/ecoricemon/logic-eval"
 license = "Apache-2.0 OR MIT"
-keywords = ["logic"]
+description = "A Prolog-like logic evaluation library with parsing, tabling, and query proof search"
+keywords = ["logic", "prolog"]
 
 [dependencies]
 any-intern = { workspace = true }
