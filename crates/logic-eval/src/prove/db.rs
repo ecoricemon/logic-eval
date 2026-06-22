@@ -1057,6 +1057,41 @@ mod tests {
     }
 
     #[test]
+    fn test_repeated_clause_variable_must_match_consistently() {
+        let mut db = Database::default();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            equal($A, $A).
+            same_pair($A, $A).
+            parent(alice, bob).
+            same_parent($Child, $Child) :- parent(alice, $Child).
+            ",
+        );
+
+        for query in [
+            "equal(a, a).",
+            "same_pair(box(a), box(a)).",
+            "same_parent(bob, bob).",
+        ] {
+            let query: Expr<'_> = parse::parse_str(query, &interner).unwrap();
+            assert!(db.query(query).is_true());
+        }
+
+        for query in [
+            "equal(a, b).",
+            "same_pair(box(a), box(b)).",
+            "same_parent(bob, carol).",
+        ] {
+            let query: Expr<'_> = parse::parse_str(query, &interner).unwrap();
+            assert!(!db.query(query).is_true());
+        }
+    }
+
+    #[test]
     fn test_query_from_multiple_threads() {
         let mut db = Database::default();
         let interner = Interner::new();
