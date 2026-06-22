@@ -1057,6 +1057,26 @@ mod tests {
     }
 
     #[test]
+    fn test_repeated_clause_variable_must_match_same_term() {
+        let mut db = Database::default();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            equal($A, $A).
+            ",
+        );
+
+        let matching_query: Expr<'_> = parse::parse_str("equal(a, a).", &interner).unwrap();
+        assert!(db.query(matching_query).is_true());
+
+        let conflicting_query: Expr<'_> = parse::parse_str("equal(a, b).", &interner).unwrap();
+        assert!(!db.query(conflicting_query).is_true());
+    }
+
+    #[test]
     fn test_query_from_multiple_threads() {
         let mut db = Database::default();
         let interner = Interner::new();
