@@ -649,16 +649,11 @@ impl UnificationOperator {
             },
         );
 
-        match from.side {
-            UnifySide::Left => ops.push(UnifyOp::Left {
-                from: from.id,
-                to: to.id,
-            }),
-            UnifySide::Right => ops.push(UnifyOp::Right {
-                from: from.id,
-                to: to.id,
-            }),
-        }
+        ops.push(UnifyOp {
+            side: from.side,
+            from: from.id,
+            to: to.id,
+        });
     }
 
     fn resolve_term(bindings: &Map<TermId, BoundTerm>, mut term: UnifyTerm) -> UnifyTerm {
@@ -688,21 +683,21 @@ impl UnificationOperator {
         let record_start = self.record.len();
 
         for op in self.ops.drain(..) {
-            match op {
-                UnifyOp::Left { from, to } => {
+            match op.side {
+                UnifySide::Left => {
                     let mut expr = query_storage.get_expr_mut(left);
-                    expr.replace_term(from, to);
+                    expr.replace_term(op.from, op.to);
                     left = expr.id();
 
-                    self.record.push((from, to));
+                    self.record.push((op.from, op.to));
                 }
-                UnifyOp::Right { from, to } => {
+                UnifySide::Right => {
                     if let Some(right_body) = right.body {
                         let mut expr = query_storage.get_expr_mut(right_body);
-                        expr.replace_term(from, to);
+                        expr.replace_term(op.from, op.to);
                         right.body = Some(expr.id());
                     }
-                    self.record.push((from, to));
+                    self.record.push((op.from, op.to));
                 }
             }
         }
@@ -837,33 +832,35 @@ impl TermVariableBindings {
 
 /// Unification operation induced by unifying the current goal term with a clause head.
 #[derive(Debug)]
-enum UnifyOp {
-    /// Unification operation that rewrites the goal expression on the query side.
-    ///
-    /// Substitutes all `from`s in the goal expression with `to`.
-    Left { from: TermId, to: TermId },
-
-    /// Unification operation that rewrites the clause body on the clause side.
-    ///
-    /// Substitutes all `from`s in the clause's body with `to`.
-    Right { from: TermId, to: TermId },
+struct UnifyOp {
+    /// Which side should be rewritten when this operation is consumed.
+    side: UnifySide,
+    from: TermId,
+    to: TermId,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum UnifySide {
+    /// Rewrites the goal expression on the query side.
     Left,
+    /// Rewrites the clause body on the clause side.
     Right,
 }
 
 #[derive(Clone, Copy)]
 struct UnifyTerm {
+    /// Term id being unified, together with the side that owns the term.
     id: TermId,
+    /// Side used to decide which expression receives a substitution if this term is a variable.
     side: UnifySide,
 }
 
 #[derive(Clone, Copy)]
 struct BoundTerm {
+    /// Term id that a variable resolved to during the current unification attempt.
     id: TermId,
+    /// Side that owns `id`; this must follow the binding so later substitutions target the right
+    /// expression.
     side: UnifySide,
 }
 
