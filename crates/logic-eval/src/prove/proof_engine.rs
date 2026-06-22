@@ -426,13 +426,9 @@ impl ProofEngine {
             unreachable!()
         };
 
-        if !query_storage
-            .get_expr(node_expr)
-            .leftmost_term()
-            .unify(query_storage.get_term(clause.head), &mut |op| {
-                self.uni_op.push_op(op)
-            })
-        {
+        let goal = query_storage.get_expr(node_expr).leftmost_term();
+        let head = query_storage.get_term(clause.head);
+        if !self.uni_op.unify(goal, head) {
             return None;
         }
         let (node_expr, clause, uni_history) =
@@ -571,8 +567,108 @@ impl UnificationOperator {
         self.record.clear();
     }
 
-    fn push_op(&mut self, op: UnifyOp) {
-        self.ops.push(op);
+    fn unify(&mut self, left: TermView<'_, AtomId>, right: TermView<'_, AtomId>) -> bool {
+        debug_assert!(self.ops.is_empty());
+
+        let mut bindings = Map::default();
+        Self::unify_inner(
+            left.buf,
+            &mut bindings,
+            &mut self.ops,
+            UnifyTerm {
+                id: left.id,
+                side: UnifySide::Left,
+            },
+            UnifyTerm {
+                id: right.id,
+                side: UnifySide::Right,
+            },
+        )
+    }
+
+    fn unify_inner(
+        buf: &[TermElem<AtomId>],
+        bindings: &mut Map<TermId, BoundTerm>,
+        ops: &mut Vec<UnifyOp>,
+        left: UnifyTerm,
+        right: UnifyTerm,
+    ) -> bool {
+        let left = Self::resolve_term(bindings, left);
+        let right = Self::resolve_term(bindings, right);
+        if left.id == right.id {
+            return true;
+        }
+
+        let left_view = TermView { buf, id: left.id };
+        let right_view = TermView { buf, id: right.id };
+        if left_view.is_variable() {
+            Self::bind_term(bindings, ops, left, right);
+            return true;
+        }
+        if right_view.is_variable() {
+            Self::bind_term(bindings, ops, right, left);
+            return true;
+        }
+        if left_view.functor() != right_view.functor() || left_view.arity() != right_view.arity() {
+            return false;
+        }
+
+        let left_side = left.side;
+        let right_side = right.side;
+        left_view
+            .args()
+            .zip(right_view.args())
+            .all(|(left, right)| {
+                Self::unify_inner(
+                    buf,
+                    bindings,
+                    ops,
+                    UnifyTerm {
+                        id: left.id,
+                        side: left_side,
+                    },
+                    UnifyTerm {
+                        id: right.id,
+                        side: right_side,
+                    },
+                )
+            })
+    }
+
+    fn bind_term(
+        bindings: &mut Map<TermId, BoundTerm>,
+        ops: &mut Vec<UnifyOp>,
+        from: UnifyTerm,
+        to: UnifyTerm,
+    ) {
+        bindings.insert(
+            from.id,
+            BoundTerm {
+                id: to.id,
+                side: to.side,
+            },
+        );
+
+        match from.side {
+            UnifySide::Left => ops.push(UnifyOp::Left {
+                from: from.id,
+                to: to.id,
+            }),
+            UnifySide::Right => ops.push(UnifyOp::Right {
+                from: from.id,
+                to: to.id,
+            }),
+        }
+    }
+
+    fn resolve_term(bindings: &Map<TermId, BoundTerm>, mut term: UnifyTerm) -> UnifyTerm {
+        while let Some(bound) = bindings.get(&term.id) {
+            term = UnifyTerm {
+                id: bound.id,
+                side: bound.side,
+            };
+        }
+        term
     }
 
     /// Returns
@@ -605,9 +701,8 @@ impl UnificationOperator {
                         let mut expr = query_storage.get_expr_mut(right_body);
                         expr.replace_term(from, to);
                         right.body = Some(expr.id());
-
-                        self.record.push((from, to));
                     }
+                    self.record.push((from, to));
                 }
             }
         }
@@ -752,6 +847,24 @@ enum UnifyOp {
     ///
     /// Substitutes all `from`s in the clause's body with `to`.
     Right { from: TermId, to: TermId },
+}
+
+#[derive(Clone, Copy)]
+enum UnifySide {
+    Left,
+    Right,
+}
+
+#[derive(Clone, Copy)]
+struct UnifyTerm {
+    id: TermId,
+    side: UnifySide,
+}
+
+#[derive(Clone, Copy)]
+struct BoundTerm {
+    id: TermId,
+    side: UnifySide,
 }
 
 /// Proof-search context for a query.
@@ -1146,35 +1259,6 @@ impl ExprView<'_, AtomId> {
 }
 
 impl TermView<'_, AtomId> {
-    fn unify<F: FnMut(UnifyOp)>(self, other: Self, f: &mut F) -> bool {
-        if self.is_variable() {
-            f(UnifyOp::Left {
-                from: self.id,
-                to: other.id,
-            });
-            true
-        } else if other.is_variable() {
-            f(UnifyOp::Right {
-                from: other.id,
-                to: self.id,
-            });
-            true
-        } else if self.functor() == other.functor() {
-            let zip = self.args().zip(other.args());
-            // Unifies only if all arguments are unifiable.
-            if self.arity() == other.arity() && zip.clone().all(|(l, r)| l.is_unifiable(r)) {
-                for (l, r) in zip {
-                    l.unify(r, f);
-                }
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        }
-    }
-
     fn is_unifiable(&self, other: Self) -> bool {
         if self.is_variable() || other.is_variable() {
             true
