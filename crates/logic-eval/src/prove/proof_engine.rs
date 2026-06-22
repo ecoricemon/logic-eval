@@ -571,10 +571,11 @@ impl UnificationOperator {
         debug_assert!(self.ops.is_empty());
 
         let mut bindings = Map::default();
-        Self::unify_inner(
+        let mut ops = Vec::new();
+        let unified = Self::unify_inner(
             left.buf,
             &mut bindings,
-            &mut self.ops,
+            &mut ops,
             UnifyTerm {
                 id: left.id,
                 side: UnifySide::Left,
@@ -583,7 +584,11 @@ impl UnificationOperator {
                 id: right.id,
                 side: UnifySide::Right,
             },
-        )
+        );
+        if unified {
+            self.ops = ops;
+        }
+        unified
     }
 
     fn unify_inner(

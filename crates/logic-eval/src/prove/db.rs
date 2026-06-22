@@ -1069,6 +1069,8 @@ mod tests {
             same_pair($A, $A).
             parent(alice, bob).
             same_parent($Child, $Child) :- parent(alice, $Child).
+            candidate($A, $A).
+            candidate(a, b).
             ",
         );
 
@@ -1076,6 +1078,7 @@ mod tests {
             "equal(a, a).",
             "same_pair(box(a), box(a)).",
             "same_parent(bob, bob).",
+            "candidate(a, b).",
         ] {
             let query: Expr<'_> = parse::parse_str(query, &interner).unwrap();
             assert!(db.query(query).is_true());
