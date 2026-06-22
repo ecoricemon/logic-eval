@@ -1057,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn test_repeated_clause_variable_must_match_same_term() {
+    fn test_repeated_clause_variable_must_match_consistently() {
         let mut db = Database::default();
         let interner = Interner::new();
 
@@ -1066,14 +1066,29 @@ mod tests {
             &interner,
             r"
             equal($A, $A).
+            same_pair($A, $A).
+            parent(alice, bob).
+            same_parent($Child, $Child) :- parent(alice, $Child).
             ",
         );
 
-        let matching_query: Expr<'_> = parse::parse_str("equal(a, a).", &interner).unwrap();
-        assert!(db.query(matching_query).is_true());
+        for query in [
+            "equal(a, a).",
+            "same_pair(box(a), box(a)).",
+            "same_parent(bob, bob).",
+        ] {
+            let query: Expr<'_> = parse::parse_str(query, &interner).unwrap();
+            assert!(db.query(query).is_true());
+        }
 
-        let conflicting_query: Expr<'_> = parse::parse_str("equal(a, b).", &interner).unwrap();
-        assert!(!db.query(conflicting_query).is_true());
+        for query in [
+            "equal(a, b).",
+            "same_pair(box(a), box(b)).",
+            "same_parent(bob, carol).",
+        ] {
+            let query: Expr<'_> = parse::parse_str(query, &interner).unwrap();
+            assert!(!db.query(query).is_true());
+        }
     }
 
     #[test]
