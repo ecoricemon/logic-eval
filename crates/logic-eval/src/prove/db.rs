@@ -1095,6 +1095,26 @@ mod tests {
     }
 
     #[test]
+    fn test_repeated_query_variable_returns_one_binding() {
+        let mut db = Database::default();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            double(pair(a, a), pair(a, a)).
+            ",
+        );
+
+        let query: Expr<'_> =
+            parse::parse_str("double(pair(a, a), pair($A, $A)).", &interner).unwrap();
+        let answer = collect_answer(db.query(query));
+        let expected = [["$A = a"]];
+        assert_eq!(answer, expected);
+    }
+
+    #[test]
     fn test_query_from_multiple_threads() {
         let mut db = Database::default();
         let interner = Interner::new();

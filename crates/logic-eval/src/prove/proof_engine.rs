@@ -899,7 +899,7 @@ impl<'a, T: Atom> QueryCx<'a, T> {
         query_storage
             .get_expr(proof_engine.query)
             .with_term(&mut |term: TermView<'_, AtomId>| {
-                term.with_variable(|term| proof_engine.query_vars.push(term.id));
+                proof_engine.query_vars.extend(term.collect_variables());
             });
 
         let node_kind = NodeKind::Expr(proof_engine.query);
