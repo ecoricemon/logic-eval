@@ -371,6 +371,43 @@ impl<T: Atom> Term<T> {
     }
 }
 
+impl<T: Atom + Eq> Term<T> {
+    /// Returns `true` if both terms have compatible non-variable structure.
+    ///
+    /// Variables on either side are treated as shape wildcards. Non-variable terms must have the
+    /// same functor, the same arity, and recursively compatible arguments.
+    ///
+    /// This is only a structural shape check, not full unification. For example, repeated variables
+    /// are not checked for consistent bindings.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use logic_eval::{parse_str, StrInterner, Term};
+    ///
+    /// let interner = StrInterner::new();
+    /// let pattern: Term<_> = parse_str("foo(a, bar($X))", &interner).unwrap();
+    /// let matching: Term<_> = parse_str("foo(a, bar(b))", &interner).unwrap();
+    /// let different: Term<_> = parse_str("foo(a, bar(c, alice))", &interner).unwrap();
+    ///
+    /// assert!(pattern.is_shape_compatible_with(&matching));
+    /// assert!(!pattern.is_shape_compatible_with(&different));
+    /// ```
+    pub fn is_shape_compatible_with(&self, other: &Self) -> bool {
+        if self.is_variable() || other.is_variable() {
+            return true;
+        }
+
+        self.functor == other.functor
+            && self.args.len() == other.args.len()
+            && self
+                .args
+                .iter()
+                .zip(&other.args)
+                .all(|(left, right)| left.is_shape_compatible_with(right))
+    }
+}
+
 impl<T: Display> Display for Term<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Display::fmt(&self.functor, f)?;
