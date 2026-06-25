@@ -13,7 +13,7 @@ pub(crate) struct ClauseId {
     pub(crate) body: Option<ExprId>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct TermStorage<T> {
     pub(crate) exprs: ExprArray,
     pub(crate) terms: UniqueTermArray<T>,
@@ -66,7 +66,7 @@ impl<T> Default for TermStorage<T> {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct ExprArray {
     buf: Vec<ExprElem>,
 }
@@ -695,7 +695,7 @@ impl ops::AddAssign<usize> for ExprId {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct UniqueTermArray<T> {
     /// e.g. ... [Functor], [Len], [Arg0], [Arg1], ...
     pub(crate) buf: Vec<TermElem<T>>,

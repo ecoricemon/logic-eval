@@ -624,7 +624,7 @@ impl<T: Atom> FusedIterator for NamedTermViewIter<'_, T> {}
 
 #[cfg(test)]
 mod tests {
-    use crate::{parse, NameIn};
+    use crate::{parse, AnswerCardinalityError, Name, NameIn};
 
     type Interner = any_intern::DroplessInterner;
     type Database<'int> = crate::Database<NameIn<'int, Interner>>;
@@ -814,6 +814,38 @@ mod tests {
         let query: Expr<'_> = parse::parse_str("allowed($X).", &interner).unwrap();
         let answer = collect_answer(db.query(query));
         let expected = [["$X = bob"]];
+        assert_eq!(answer, expected);
+    }
+
+    #[test]
+    fn test_independent_rule_body_variables_form_cartesian_product() {
+        let mut db = Database::default();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            left(a0).
+            left(a1).
+            right(b0).
+            right(b1).
+
+            foo($A, $B) :- left($A), right($B).
+            ",
+        );
+
+        let query: Expr<'_> = parse::parse_str("foo($A, $B).", &interner).unwrap();
+        let mut answer = collect_answer(db.query(query));
+        let mut expected = [
+            ["$A = a0", "$B = b0"],
+            ["$A = a0", "$B = b1"],
+            ["$A = a1", "$B = b0"],
+            ["$A = a1", "$B = b1"],
+        ];
+
+        answer.sort_unstable();
+        expected.sort_unstable();
         assert_eq!(answer, expected);
     }
 
@@ -1114,6 +1146,184 @@ mod tests {
         let answer = collect_answer(db.query(query));
         let expected = [["$A = a"]];
         assert_eq!(answer, expected);
+    }
+
+    #[test]
+    fn test_answer_view_get_returns_binding_by_query_variable() {
+        let mut db = Database::default();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            foo(a0, b0).
+            ",
+        );
+
+        let query: Expr<'_> = parse::parse_str("foo($A, $B).", &interner).unwrap();
+        let mut cx = db.query(query);
+        let mut answer = cx.prove_next().unwrap();
+        let var_a = Name::with_intern("$A", &interner);
+        let var_b = Name::with_intern("$B", &interner);
+        let missing = Name::with_intern("$Missing", &interner);
+
+        assert_eq!(answer.get(&var_a).unwrap().to_string(), "a0");
+        assert_eq!(answer.get(&var_b).unwrap().to_string(), "b0");
+        assert!(answer.get(&missing).is_none());
+
+        assert_eq!(answer.next().unwrap().to_string(), "$A = a0");
+        assert_eq!(answer.get(&var_a).unwrap().to_string(), "a0");
+        assert_eq!(answer.get(&var_b).unwrap().to_string(), "b0");
+    }
+
+    #[test]
+    fn test_answer_view_get_preserves_repeated_query_variable_invariant() {
+        let mut db = Database::default();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            double(pair(a, a), pair(a, a)).
+            ",
+        );
+
+        let query: Expr<'_> =
+            parse::parse_str("double(pair(a, a), pair($A, $A)).", &interner).unwrap();
+        let mut cx = db.query(query);
+        let mut answer = cx.prove_next().unwrap();
+        let var_a = Name::with_intern("$A", &interner);
+
+        assert_eq!(answer.get(&var_a).unwrap().to_string(), "a");
+        assert_eq!(answer.next().unwrap().to_string(), "$A = a");
+        assert!(answer.next().is_none());
+    }
+
+    #[test]
+    fn test_answer_view_materialize_copies_the_full_answer_row() {
+        let mut db = Database::default();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            foo(a0, b0).
+            ",
+        );
+
+        let query: Expr<'_> = parse::parse_str("foo($A, $B).", &interner).unwrap();
+        let mut cx = db.query(query);
+        let mut answer = cx.prove_next().unwrap();
+        let var_a = Name::with_intern("$A", &interner);
+        let var_b = Name::with_intern("$B", &interner);
+
+        assert_eq!(answer.next().unwrap().to_string(), "$A = a0");
+
+        let answer = answer.materialize();
+        assert_eq!(answer.get(&var_a).unwrap().to_string(), "a0");
+        assert_eq!(answer.get(&var_b).unwrap().to_string(), "b0");
+        assert_eq!(
+            answer
+                .bindings()
+                .iter()
+                .map(|(var, term)| format!("{var} = {term}"))
+                .collect::<Vec<_>>(),
+            ["$A = a0", "$B = b0"]
+        );
+    }
+
+    #[test]
+    fn test_prove_unique_returns_the_only_answer() {
+        let mut db = Database::default();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            foo(a).
+            ",
+        );
+
+        let query: Expr<'_> = parse::parse_str("foo($X).", &interner).unwrap();
+        let mut cx = db.query(query);
+        let answer = cx.prove_unique().unwrap();
+        let var_x = Name::with_intern("$X", &interner);
+
+        assert_eq!(answer.get(&var_x).unwrap().to_string(), "a");
+    }
+
+    #[test]
+    fn test_prove_unique_rejects_no_answer() {
+        let mut db = Database::default();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            foo(a).
+            ",
+        );
+
+        let query: Expr<'_> = parse::parse_str("foo(b).", &interner).unwrap();
+        let mut cx = db.query(query);
+
+        assert!(matches!(
+            cx.prove_unique(),
+            Err(AnswerCardinalityError::NoAnswer)
+        ));
+    }
+
+    #[test]
+    fn test_prove_unique_rejects_multiple_answers() {
+        let mut db = Database::default();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            foo(a).
+            foo(b).
+            ",
+        );
+
+        let query: Expr<'_> = parse::parse_str("foo($X).", &interner).unwrap();
+        let mut cx = db.query(query);
+
+        assert!(matches!(
+            cx.prove_unique(),
+            Err(AnswerCardinalityError::MultipleAnswers)
+        ));
+    }
+
+    #[test]
+    fn test_prove_unique_consumes_query_while_checking_cardinality() {
+        let mut db = Database::default();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            foo(a).
+            foo(b).
+            ",
+        );
+
+        let query: Expr<'_> = parse::parse_str("foo($X).", &interner).unwrap();
+        let mut cx = db.query(query);
+
+        assert!(matches!(
+            cx.prove_unique(),
+            Err(AnswerCardinalityError::MultipleAnswers)
+        ));
+
+        assert!(cx.prove_next().is_none());
     }
 
     #[test]

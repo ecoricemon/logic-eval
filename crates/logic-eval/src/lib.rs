@@ -15,7 +15,7 @@ pub use parse::{
 pub use prove::{
     common::Atom,
     db::{ClauseIter, ClauseRef, Database},
-    proof_engine::QueryCx,
+    proof_engine::{Answer, AnswerCardinalityError, QueryCx},
 };
 
 /// Re-exports of the interning types used by this crate.

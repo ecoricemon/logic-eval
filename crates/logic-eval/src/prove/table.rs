@@ -6,7 +6,7 @@ use super::{
 use crate::{prove::proof_engine::TermVariableBindings, Map};
 use core::ops::{Index, IndexMut};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct Table {
     indices: Map<CanonicalTermId, usize>,
     entries: Vec<TableEntry>,
@@ -53,7 +53,7 @@ impl IndexMut<TableIndex> for Table {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct TableEntry {
     /// Non-empty assignment record for variables in a node.
     ///
@@ -138,7 +138,7 @@ impl TableEntry {
 ///      Y       |    b    |    y    |    j    |
 ///      W       |    c    |    z    |    k    |
 ///      Z       |    d    |    w    |    l    |
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct AnswerMatrix {
     /// Column-wise elements, e.g. X, Y, W, Z, a, b, c, d, ...
     elems: Vec<TermId>,
@@ -204,7 +204,7 @@ impl AnswerMatrix {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Consumer {
     node_index: usize,
 }

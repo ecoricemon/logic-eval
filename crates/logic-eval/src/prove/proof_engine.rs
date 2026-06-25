@@ -20,7 +20,7 @@ use core::{
 use smallvec::SmallVec;
 use std::collections::VecDeque;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ProofEngine {
     uni_op: UnificationOperator,
 
@@ -542,7 +542,7 @@ impl ProofEngine {
 /// operations in order, then apply them to the whole goal and clause at once with [`consume_ops`].
 ///
 /// [`consume_ops`]: Self::consume_ops
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct UnificationOperator {
     /// Buffered unification operations.
     ops: Vec<UnifyOp>,
@@ -715,7 +715,7 @@ impl UnificationOperator {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct NodeQueue {
     inner: VecDeque<usize>,
 }
@@ -784,7 +784,7 @@ enum NodeKind {
     Leaf(bool),
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct TermVariableBindings {
     /// Union-find from/to relations.
     ///
@@ -836,7 +836,7 @@ impl TermVariableBindings {
 }
 
 /// Unification operation induced by unifying the current goal term with a clause head.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct UnifyOp {
     /// Which side should be rewritten when this operation is consumed.
     side: UnifySide,
@@ -870,6 +870,7 @@ struct BoundTerm {
 }
 
 /// Proof-search context for a query.
+#[derive(Clone)]
 pub struct QueryCx<'a, T: Atom> {
     proof_engine: ProofEngine,
     clauses: &'a IndexMap<Predicate<AtomId>, Vec<ClauseId>>,
@@ -971,6 +972,25 @@ impl<'a, T: Atom> QueryCx<'a, T> {
         None
     }
 
+    /// Returns the only proof result when this query has exactly one answer.
+    ///
+    /// Returns [`AnswerCardinalityError::NoAnswer`] when the query has no answers, and
+    /// [`AnswerCardinalityError::MultipleAnswers`] when there is more than one answer row.
+    ///
+    /// The returned [`Answer`] owns its bindings, so it is independent of this query context's
+    /// lifetime. This method advances the query while checking whether a second answer exists.
+    pub fn prove_unique(&mut self) -> Result<Answer<T>, AnswerCardinalityError> {
+        let answer = self
+            .prove_next()
+            .ok_or(AnswerCardinalityError::NoAnswer)?
+            .materialize();
+        if self.prove_next().is_some() {
+            return Err(AnswerCardinalityError::MultipleAnswers);
+        }
+
+        Ok(answer)
+    }
+
     /// Returns `true` if the query has at least one proof.
     ///
     /// # Examples
@@ -991,7 +1011,50 @@ impl<'a, T: Atom> QueryCx<'a, T> {
     }
 }
 
+/// Error returned when a query does not have exactly one answer row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnswerCardinalityError {
+    /// The query has no answer rows.
+    NoAnswer,
+    /// The query has more than one answer row.
+    MultipleAnswers,
+}
+
+impl Display for AnswerCardinalityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoAnswer => f.write_str("query has no answers"),
+            Self::MultipleAnswers => f.write_str("query has multiple answers"),
+        }
+    }
+}
+
+impl std::error::Error for AnswerCardinalityError {}
+
+/// Owned bindings produced by one proof result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answer<T> {
+    bindings: Vec<(T, Term<T>)>,
+}
+
+impl<T> Answer<T> {
+    /// Iterates over the query-variable bindings in this answer row.
+    pub fn bindings(&self) -> &[(T, Term<T>)] {
+        &self.bindings
+    }
+}
+
+impl<T: Eq> Answer<T> {
+    /// Returns the right-hand-side term assigned to a query variable in this answer row.
+    pub fn get(&self, variable: &T) -> Option<&Term<T>> {
+        self.bindings
+            .iter()
+            .find_map(|(var, term)| (var == variable).then_some(term))
+    }
+}
+
 /// Name mapping for a query: database names are borrowed, query-only names are local.
+#[derive(Clone)]
 struct QueryNameInterner<'a, T> {
     database: &'a NameInterner<T>,
     local: NameInterner<T>,
@@ -1041,6 +1104,46 @@ pub struct AnswerView<'a, T> {
 impl<T> AnswerView<'_, T> {
     const fn len(&self) -> usize {
         self.end - self.start
+    }
+}
+
+impl<'a, T: Atom + Eq + 'a> AnswerView<'a, T> {
+    /// Returns the right-hand-side term assigned to a query variable in this answer row.
+    ///
+    /// The lookup scans the full answer row, so it is independent of how much of the iterator has
+    /// already been consumed.
+    pub fn get(&self, variable: &T) -> Option<Term<T>> {
+        self.query_vars.iter().find_map(|&from| {
+            let binding = VariableBinding {
+                buf: self.terms,
+                from,
+                unification_assignments: self.unification_assignments,
+                name_interner: self.name_interner,
+            };
+            (binding.get_lhs_variable() == variable).then(|| binding.rhs())
+        })
+    }
+
+    /// Creates an owned copy of this answer row.
+    ///
+    /// The materialized answer contains the full row, so it is independent of how much of the
+    /// iterator has already been consumed.
+    pub fn materialize(&self) -> Answer<T> {
+        let bindings = self
+            .query_vars
+            .iter()
+            .map(|&from| {
+                let binding = VariableBinding {
+                    buf: self.terms,
+                    from,
+                    unification_assignments: self.unification_assignments,
+                    name_interner: self.name_interner,
+                };
+                (binding.get_lhs_variable().clone(), binding.rhs())
+            })
+            .collect();
+
+        Answer { bindings }
     }
 }
 
@@ -1347,7 +1450,7 @@ impl ops::AddAssign<u32> for AtomId {
 /// Stores mappings only for user-provided clause/query names.
 ///
 /// Auto-generated names such as temporary variables are not stored here.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct NameInterner<T> {
     name_to_id: IndexMap<T, AtomId>,
     id_to_name: IndexMap<AtomId, T>,
