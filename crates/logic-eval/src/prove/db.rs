@@ -399,12 +399,18 @@ impl<T: Debug> Debug for Database<T> {
     }
 }
 
+/// Tracks clauses already inserted into a database after normalizing variable names.
+///
+/// Clause variables are local to one clause, so `p($A).` and `p($B).` should count as the same
+/// clause. The checker rewrites each source variable to a per-clause canonical variable while
+/// preserving repeated-variable identity across the head and body. For example,
+/// `p($A, $B) :- q($A, $B).` and `p($A, $B) :- q($B, $A).` remain distinct.
 #[derive(Debug, Default)]
 struct DuplicateClauseChecker {
     seen: IndexSet<Clause<AtomId>>,
 
-    /// Temporary buffer for assigning canonical [`AtomId`]s to variables.
-    vars: Vec<AtomId>,
+    /// Temporary map from source variables to canonical [`AtomId`]s.
+    vars: Map<AtomId, AtomId>,
 }
 
 impl DuplicateClauseChecker {
@@ -413,13 +419,9 @@ impl DuplicateClauseChecker {
         let canonical_clause = clause.map(&mut |t| {
             if !t.is_variable() {
                 t
-            } else if let Some(found) = self.vars.iter().find(|&&var| var == t) {
-                *found
             } else {
                 let next_id = self.vars.len() as u32;
-                let atom_id = AtomId::variable(next_id);
-                self.vars.push(atom_id);
-                atom_id
+                *self.vars.entry(t).or_insert(AtomId::variable(next_id))
             }
         });
         let is_new = self.seen.insert(canonical_clause);
@@ -1112,6 +1114,29 @@ mod tests {
         let answer = collect_answer(db.query(query));
         let expected = [["$A = a"]];
         assert_eq!(answer, expected);
+    }
+
+    #[test]
+    fn test_rule_body_tries_later_candidate_after_failed_candidates() {
+        let mut db = Database::default();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            p($X) :- r($X, c).
+            r($A, $B) :- e($A, $B).
+            r($A, $B) :- e($B, $A).
+
+            e(c, b).
+            ",
+        );
+
+        let query: Expr<'_> = parse::parse_str("p(b)", &interner).unwrap();
+
+        let cx = db.query(query);
+        assert!(cx.is_true());
     }
 
     #[test]
