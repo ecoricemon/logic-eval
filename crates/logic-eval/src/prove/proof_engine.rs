@@ -12,6 +12,7 @@ use crate::{
     Atom, IndexMap, IndexSet, Map, VAR_PREFIX,
 };
 use core::{
+    borrow::Borrow,
     fmt::{self, Debug, Display, Write},
     hash::Hash,
     iter,
@@ -1044,12 +1045,18 @@ impl<T> Answer<T> {
     }
 }
 
-impl<T: Eq> Answer<T> {
+impl<T> Answer<T> {
     /// Returns the right-hand-side term assigned to a query variable in this answer row.
-    pub fn get(&self, variable: &T) -> Option<&Term<T>> {
+    ///
+    /// The variable may be passed in a borrowed form such as `str` when the atom type supports it.
+    pub fn get<Q>(&self, variable: &Q) -> Option<&Term<T>>
+    where
+        T: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
         self.bindings
             .iter()
-            .find_map(|(var, term)| (var == variable).then_some(term))
+            .find_map(|(var, term)| (var.borrow() == variable).then_some(term))
     }
 }
 
@@ -1107,12 +1114,17 @@ impl<T> AnswerView<'_, T> {
     }
 }
 
-impl<'a, T: Atom + Eq + 'a> AnswerView<'a, T> {
+impl<'a, T: Atom + 'a> AnswerView<'a, T> {
     /// Returns the right-hand-side term assigned to a query variable in this answer row.
     ///
     /// The lookup scans the full answer row, so it is independent of how much of the iterator has
-    /// already been consumed.
-    pub fn get(&self, variable: &T) -> Option<Term<T>> {
+    /// already been consumed. The variable may be passed in a borrowed form such as `str` when the
+    /// atom type supports it.
+    pub fn get<Q>(&self, variable: &Q) -> Option<Term<T>>
+    where
+        T: Borrow<Q>,
+        Q: Eq + ?Sized,
+    {
         self.query_vars.iter().find_map(|&from| {
             let binding = VariableBinding {
                 buf: self.terms,
@@ -1120,7 +1132,7 @@ impl<'a, T: Atom + Eq + 'a> AnswerView<'a, T> {
                 unification_assignments: self.unification_assignments,
                 name_interner: self.name_interner,
             };
-            (binding.get_lhs_variable() == variable).then(|| binding.rhs())
+            (binding.get_lhs_variable().borrow() == variable).then(|| binding.rhs())
         })
     }
 

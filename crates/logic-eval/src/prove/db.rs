@@ -624,7 +624,7 @@ impl<T: Atom> FusedIterator for NamedTermViewIter<'_, T> {}
 
 #[cfg(test)]
 mod tests {
-    use crate::{parse, AnswerCardinalityError, Name, NameIn};
+    use crate::{parse, AnswerCardinalityError, NameIn};
 
     type Interner = any_intern::DroplessInterner;
     type Database<'int> = crate::Database<NameIn<'int, Interner>>;
@@ -1164,17 +1164,14 @@ mod tests {
         let query: Expr<'_> = parse::parse_str("foo($A, $B).", &interner).unwrap();
         let mut cx = db.query(query);
         let mut answer = cx.prove_next().unwrap();
-        let var_a = Name::with_intern("$A", &interner);
-        let var_b = Name::with_intern("$B", &interner);
-        let missing = Name::with_intern("$Missing", &interner);
 
-        assert_eq!(answer.get(&var_a).unwrap().to_string(), "a0");
-        assert_eq!(answer.get(&var_b).unwrap().to_string(), "b0");
-        assert!(answer.get(&missing).is_none());
+        assert_eq!(answer.get("$A").unwrap().to_string(), "a0");
+        assert_eq!(answer.get("$B").unwrap().to_string(), "b0");
+        assert!(answer.get("$Missing").is_none());
 
         assert_eq!(answer.next().unwrap().to_string(), "$A = a0");
-        assert_eq!(answer.get(&var_a).unwrap().to_string(), "a0");
-        assert_eq!(answer.get(&var_b).unwrap().to_string(), "b0");
+        assert_eq!(answer.get("$A").unwrap().to_string(), "a0");
+        assert_eq!(answer.get("$B").unwrap().to_string(), "b0");
     }
 
     #[test]
@@ -1194,9 +1191,8 @@ mod tests {
             parse::parse_str("double(pair(a, a), pair($A, $A)).", &interner).unwrap();
         let mut cx = db.query(query);
         let mut answer = cx.prove_next().unwrap();
-        let var_a = Name::with_intern("$A", &interner);
 
-        assert_eq!(answer.get(&var_a).unwrap().to_string(), "a");
+        assert_eq!(answer.get("$A").unwrap().to_string(), "a");
         assert_eq!(answer.next().unwrap().to_string(), "$A = a");
         assert!(answer.next().is_none());
     }
@@ -1217,14 +1213,12 @@ mod tests {
         let query: Expr<'_> = parse::parse_str("foo($A, $B).", &interner).unwrap();
         let mut cx = db.query(query);
         let mut answer = cx.prove_next().unwrap();
-        let var_a = Name::with_intern("$A", &interner);
-        let var_b = Name::with_intern("$B", &interner);
 
         assert_eq!(answer.next().unwrap().to_string(), "$A = a0");
 
         let answer = answer.materialize();
-        assert_eq!(answer.get(&var_a).unwrap().to_string(), "a0");
-        assert_eq!(answer.get(&var_b).unwrap().to_string(), "b0");
+        assert_eq!(answer.get("$A").unwrap().to_string(), "a0");
+        assert_eq!(answer.get("$B").unwrap().to_string(), "b0");
         assert_eq!(
             answer
                 .bindings()
@@ -1251,9 +1245,8 @@ mod tests {
         let query: Expr<'_> = parse::parse_str("foo($X).", &interner).unwrap();
         let mut cx = db.query(query);
         let answer = cx.prove_unique().unwrap();
-        let var_x = Name::with_intern("$X", &interner);
 
-        assert_eq!(answer.get(&var_x).unwrap().to_string(), "a");
+        assert_eq!(answer.get("$X").unwrap().to_string(), "a");
     }
 
     #[test]
