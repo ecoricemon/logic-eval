@@ -793,6 +793,11 @@ pub(crate) struct TermVariableBindings {
     /// `roots[a]: a` means TermId(a) is not unified with anything.
     /// `roots[v]: w` means TermId(v) is a variable and it is unified with TermId(w).
     relations: Vec<TermId>,
+
+    /// Indices whose relation was changed from the identity relation.
+    ///
+    /// Clearing resets only these slots and keeps the allocated identity table for the next answer.
+    touched_relations: Vec<usize>,
 }
 
 impl TermVariableBindings {
@@ -816,7 +821,7 @@ impl TermVariableBindings {
             to
         } else {
             let root = self.find_optimize(to);
-            self.relations[from.0] = root;
+            self.set_relation(from, root);
             root
         }
     }
@@ -826,13 +831,23 @@ impl TermVariableBindings {
     }
 
     fn clear(&mut self) {
-        self.relations.clear();
+        for index in self.touched_relations.drain(..) {
+            self.relations[index] = TermId(index);
+        }
     }
 
     fn add(&mut self, from: TermId, to: TermId) {
         let root_from = self.find_optimize(from);
         let root_to = self.find_optimize(to);
-        self.relations[root_from.0] = root_to;
+        self.set_relation(root_from, root_to);
+    }
+
+    #[inline]
+    fn set_relation(&mut self, from: TermId, to: TermId) {
+        if self.relations[from.0] != to {
+            self.touched_relations.push(from.0);
+            self.relations[from.0] = to;
+        }
     }
 }
 
@@ -895,7 +910,7 @@ impl<'a, T: Atom> QueryCx<'a, T> {
         let mut name_interner = QueryNameInterner::new(database_name_interner);
         let query = query.map(&mut |name| name_interner.intern(name));
 
-        let mut query_storage = TermStorage::default();
+        let mut query_storage = TermStorage::with_capacity_of(database_storage);
         proof_engine.query = query_storage.insert_expr(query);
 
         query_storage

@@ -20,6 +20,17 @@ pub(crate) struct TermStorage<T> {
 }
 
 impl<T> TermStorage<T> {
+    pub(crate) fn with_capacity(exprs: usize, terms: usize) -> Self {
+        Self {
+            exprs: ExprArray::with_capacity(exprs),
+            terms: UniqueTermArray::with_capacity(terms),
+        }
+    }
+
+    pub(crate) fn with_capacity_of(other: &Self) -> Self {
+        Self::with_capacity(other.exprs.buf.len(), other.terms.buf.len())
+    }
+
     pub(crate) fn get_expr(&self, id: ExprId) -> ExprView<'_, T> {
         self.exprs.get(id, &self.terms.buf)
     }
@@ -46,13 +57,13 @@ impl<T: Clone + Eq + Hash> TermStorage<T> {
         self.terms.insert(term)
     }
 
-    // TODO: It seems to be a redundant deserialization and serialization.
     pub(crate) fn import_clause(&mut self, src: &Self, clause: ClauseId) -> ClauseId {
         ClauseId {
-            head: self.insert_term(src.get_term(clause.head).deserialize()),
-            body: clause
-                .body
-                .map(|expr| self.insert_expr(src.get_expr(expr).deserialize())),
+            head: self.terms.insert_from(&src.terms, clause.head),
+            body: clause.body.map(|expr| {
+                self.exprs
+                    .insert_from(&mut self.terms, &src.exprs, &src.terms, expr)
+            }),
         }
     }
 }
@@ -72,6 +83,12 @@ pub(crate) struct ExprArray {
 }
 
 impl ExprArray {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(capacity),
+        }
+    }
+
     fn get<'a, T>(&'a self, id: ExprId, term_buf: &'a [TermElem<T>]) -> ExprView<'a, T> {
         ExprView {
             expr_buf: &self.buf,
@@ -135,6 +152,58 @@ impl ExprArray {
 
                 ExprId(idx)
             }
+        }
+    }
+
+    fn insert_from<T: Clone + Eq + Hash>(
+        &mut self,
+        term_arr: &mut UniqueTermArray<T>,
+        src_exprs: &Self,
+        src_terms: &UniqueTermArray<T>,
+        src_id: ExprId,
+    ) -> ExprId {
+        match src_exprs[src_id] {
+            ExprElem::Term(term) => {
+                let term = term_arr.insert_from(src_terms, term);
+                let id = ExprId(self.buf.len());
+                self.buf.push(ExprElem::Term(term));
+                id
+            }
+            ExprElem::Not(inner) => {
+                let idx = self.reserve(1);
+                let inner_id = self.insert_from(term_arr, src_exprs, src_terms, inner);
+                self.buf[idx] = ExprElem::Not(inner_id);
+                ExprId(idx)
+            }
+            ExprElem::And { len } => {
+                let idx = self.reserve(1 + len);
+
+                self.buf[idx] = ExprElem::And { len };
+                for i in 0..len {
+                    let ExprElem::Expr(arg) = src_exprs[src_id.0 + 1 + i] else {
+                        unreachable!()
+                    };
+                    let arg_id = self.insert_from(term_arr, src_exprs, src_terms, arg);
+                    self.buf[idx + 1 + i] = ExprElem::Expr(arg_id);
+                }
+
+                ExprId(idx)
+            }
+            ExprElem::Or { len } => {
+                let idx = self.reserve(1 + len);
+
+                self.buf[idx] = ExprElem::Or { len };
+                for i in 0..len {
+                    let ExprElem::Expr(arg) = src_exprs[src_id.0 + 1 + i] else {
+                        unreachable!()
+                    };
+                    let arg_id = self.insert_from(term_arr, src_exprs, src_terms, arg);
+                    self.buf[idx + 1 + i] = ExprElem::Expr(arg_id);
+                }
+
+                ExprId(idx)
+            }
+            ExprElem::Expr(expr) => self.insert_from(term_arr, src_exprs, src_terms, expr),
         }
     }
 
@@ -276,17 +345,6 @@ impl<'a, T> ExprView<'a, T> {
             ExprKind::And(args) | ExprKind::Or(args) => {
                 args.into_iter().for_each(|arg| arg.with_term(f))
             }
-        }
-    }
-}
-
-impl<'a, T: Clone> ExprView<'a, T> {
-    pub(crate) fn deserialize(self) -> Expr<T> {
-        match self.as_kind() {
-            ExprKind::Term(term) => Expr::Term(term.deserialize()),
-            ExprKind::Not(inner) => Expr::Not(Box::new(inner.deserialize())),
-            ExprKind::And(args) => Expr::And(args.map(Self::deserialize).collect()),
-            ExprKind::Or(args) => Expr::Or(args.map(Self::deserialize).collect()),
         }
     }
 }
@@ -713,6 +771,13 @@ pub(crate) struct UniqueTermArray<T> {
 }
 
 impl<T> UniqueTermArray<T> {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            buf: Vec::with_capacity(capacity),
+            map: PassThroughIndexMap::with_capacity_and_hasher(capacity, Default::default()),
+        }
+    }
+
     pub(crate) fn terms(&self) -> TermViewIter<'_, T> {
         TermViewIter {
             buf: &self.buf,
@@ -830,6 +895,68 @@ impl<T: Clone + Eq + Hash + PartialEq> UniqueTermArray<T> {
                     .args()
                     .zip(&right.args)
                     .all(|(arg_view, arg)| is_same(buf, arg_view.id, arg))
+        }
+    }
+
+    fn insert_from(&mut self, src: &Self, src_id: TermId) -> TermId {
+        let hash = buf_term_hash(&src.buf, src_id);
+        let arity = src.get(src_id).arity();
+        let mut args = Vec::with_capacity(arity as usize);
+        for arg in src.get(src_id).args() {
+            args.push(self.insert_from(src, arg.id));
+        }
+
+        for id in Self::get_similar(self.map.get_mut(&hash), &self.buf, hash) {
+            if is_same(&self.buf, id, &src.buf, src_id, &args) {
+                return id;
+            }
+        }
+
+        let id = TermId(self.buf.len());
+        self.add_mapping(hash, id);
+
+        let TermElem::Functor(functor) = &src.buf[src_id.0] else {
+            unreachable!()
+        };
+        self.buf.push(TermElem::Functor(functor.clone()));
+        self.buf.push(TermElem::Arity(arity));
+
+        let arg_idx = self.reserve(args.len());
+        for (i, arg) in args.into_iter().enumerate() {
+            self.buf[arg_idx + i] = TermElem::Arg(arg);
+        }
+
+        return id;
+
+        // === Internal helper functions ===
+
+        fn is_same<T: PartialEq>(
+            dst: &[TermElem<T>],
+            dst_id: TermId,
+            src: &[TermElem<T>],
+            src_id: TermId,
+            src_args_in_dst: &[TermId],
+        ) -> bool {
+            let TermElem::Functor(dst_functor) = &dst[dst_id.0] else {
+                return false;
+            };
+            let TermElem::Functor(src_functor) = &src[src_id.0] else {
+                return false;
+            };
+            if dst_functor != src_functor {
+                return false;
+            }
+
+            let TermElem::Arity(dst_arity) = dst[dst_id.0 + 1] else {
+                return false;
+            };
+            if dst_arity as usize != src_args_in_dst.len() {
+                return false;
+            }
+
+            src_args_in_dst.iter().enumerate().all(|(i, src_arg)| {
+                matches!(dst[dst_id.0 + 2 + i], TermElem::Arg(dst_arg) if dst_arg == *src_arg)
+            })
         }
     }
 }

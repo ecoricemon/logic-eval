@@ -23,6 +23,10 @@ criterion = "0.4"
 name = "query_threads"
 harness = false
 
+[[bench]]
+name = "candidate_filter"
+harness = false
+
 [[example]]
 name = "meal_recommendation"
 path = "examples/meal_recommendation.rs"

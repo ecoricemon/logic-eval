@@ -1343,6 +1343,59 @@ mod tests {
     }
 
     #[test]
+    fn test_candidate_filter_query_filters_candidate_fanout() {
+        const REQUESTS: usize = 8;
+        const NOISE_CANDIDATES_PER_REQUEST: usize = 4;
+
+        fn nested_type(name: &str) -> String {
+            format!("vec(vec({name}))")
+        }
+
+        let mut source = String::new();
+        for i in 0..REQUESTS {
+            let request = format!("req{i}");
+            let candidate = format!("candidate{i}");
+            let expected = nested_type(&format!("ty{i}"));
+
+            source.push_str(&format!("expected_value({request}, {expected}).\n"));
+            source.push_str(&format!("enabled_candidate({candidate}).\n"));
+            source.push_str(&format!(
+                "candidate_value({request}, {candidate}, {expected}).\n"
+            ));
+
+            for j in 0..NOISE_CANDIDATES_PER_REQUEST {
+                let noise_candidate = format!("candidate_noise_{i}_{j}");
+                let noise_ty = nested_type(&format!("ty_noise_{i}_{j}"));
+                source.push_str(&format!(
+                    "candidate_value({request}, {noise_candidate}, {noise_ty}).\n"
+                ));
+            }
+        }
+
+        source.push_str(
+            r"
+            same_shape($Value, $Value).
+            same_shape(vec($A), vec($B)) :- same_shape($A, $B).
+            candidate_match($Request, $Candidate) :-
+                candidate_value($Request, $Candidate, $Value),
+                expected_value($Request, $Expected),
+                same_shape($Value, $Expected),
+                enabled_candidate($Candidate).
+            ",
+        );
+
+        let mut db = Database::default();
+        let interner = Interner::new();
+        insert_dataset(&mut db, &interner, &source);
+
+        let query: Expr<'_> =
+            parse::parse_str("candidate_match(req3, $Candidate).", &interner).unwrap();
+        let answer = collect_answer(db.query(query));
+        let expected = [["$Candidate = candidate3"]];
+        assert_eq!(answer, expected);
+    }
+
+    #[test]
     fn test_query_from_multiple_threads() {
         let mut db = Database::default();
         let interner = Interner::new();
