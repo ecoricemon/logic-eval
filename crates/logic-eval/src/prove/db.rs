@@ -3,7 +3,7 @@ use super::{
         format::{NamedExprView, NamedTermView},
         AtomId, NameInterner, ProofEngine, QueryCx,
     },
-    repr::{ClauseId, TermStorage},
+    repr::{buf_term_hash, structurally_eq_terms, ClauseId, TermId, TermStorage},
 };
 use crate::{
     parse::{
@@ -11,17 +11,18 @@ use crate::{
         VAR_PREFIX,
     },
     prove::repr::{ExprKind, ExprView, TermView, TermViewIter},
-    Atom, IndexMap, IndexSet, Map,
+    Atom, IndexMap, IndexSet, Map, PassThroughMap,
 };
 use core::{
     fmt::{self, Debug, Display, Write},
     iter::FusedIterator,
 };
+use smallvec::SmallVec;
 
 /// A clause database that can answer logic queries.
 pub struct Database<T> {
     /// Clauses grouped by predicate.
-    clauses: IndexMap<Predicate<AtomId>, Vec<ClauseId>>,
+    clauses: IndexMap<Predicate<AtomId>, PredicateClauses>,
 
     /// Predicates that should be handled by tabling.
     tabled_predicates: IndexSet<Predicate<AtomId>>,
@@ -147,12 +148,8 @@ impl<T: Atom> Database<T> {
 
         self.clauses
             .entry(key)
-            .and_modify(|candidate_clauses| {
-                if candidate_clauses.iter().all(|clause| clause != &value) {
-                    candidate_clauses.push(value);
-                }
-            })
-            .or_insert(vec![value]);
+            .or_default()
+            .insert(value, &self.database_storage);
     }
 
     /// Starts a query against the database.
@@ -216,7 +213,7 @@ impl<T: Atom> Database<T> {
         };
 
         for clauses in self.clauses.values() {
-            for clause in clauses {
+            for clause in &clauses.all {
                 let head = self.database_storage.get_term(clause.head);
                 write_term(head, &mut conv_map, &mut prolog_text);
 
@@ -399,6 +396,129 @@ impl<T: Debug> Debug for Database<T> {
     }
 }
 
+/// Clauses for one predicate, grouped with small lookup buckets for query optimization.
+///
+/// The buckets let proof search skip clauses that are obviously incompatible with a ground query
+/// argument before importing them into query-local storage. They are conservative: candidates that
+/// remain here still go through full unification later, and candidate order is restored to clause
+/// insertion order.
+#[derive(Debug, Default)]
+pub(crate) struct PredicateClauses {
+    all: Vec<ClauseId>,
+    positions: Map<ClauseId, usize>,
+    args: Vec<ArgBuckets>,
+}
+
+impl PredicateClauses {
+    fn insert(&mut self, clause: ClauseId, storage: &TermStorage<AtomId>) {
+        if self.all.contains(&clause) {
+            if cfg!(debug_assertions) {
+                panic!("duplicate clause inserted into PredicateClauses: {clause:?}")
+            } else {
+                return;
+            }
+        }
+
+        let position = self.all.len();
+        self.all.push(clause);
+        self.positions.insert(clause, position);
+
+        let head = storage.get_term(clause.head);
+        for (arg_index, arg) in head.args().enumerate() {
+            while self.args.len() <= arg_index {
+                self.args.push(ArgBuckets::default());
+            }
+            let buckets = &mut self.args[arg_index];
+            if arg.contains_variable() {
+                buckets.variable.push(clause);
+            } else {
+                let hash = buf_term_hash(storage.terms.as_ref(), arg.id);
+                buckets.ground.entry(hash).or_default().push(clause);
+            }
+        }
+    }
+
+    /// Returns clauses except those that are obviously not unifiable with `query_term`.
+    ///
+    /// For example, given these clauses:
+    ///
+    /// ```text
+    /// value(candidate0, target, exact0).
+    /// value(candidate1, other, exact1).
+    /// value($Candidate, target, fallback).
+    /// ```
+    ///
+    /// A query like `value($Candidate, target, $Value)` can use the second argument to skip the
+    /// `other` clause, while the exact `target` clause and the variable-head clause remain.
+    pub(crate) fn candidates_for<'a>(
+        &'a self,
+        database_storage: &'a TermStorage<AtomId>,
+        query_storage: &'a TermStorage<AtomId>,
+        query_term: TermView<'_, AtomId>,
+    ) -> SmallVec<[ClauseId; 2]> {
+        let Some((arg_index, query_arg, buckets, ground)) =
+            self.best_ground_arg_bucket(query_storage, query_term)
+        else {
+            return self.all.iter().copied().collect();
+        };
+
+        let mut candidates = buckets
+            .variable
+            .iter()
+            .copied()
+            .chain(ground.iter().copied().filter(|clause| {
+                let db_head = database_storage.get_term(clause.head);
+                let Some(db_arg) = db_head.args().nth(arg_index) else {
+                    return false;
+                };
+                structurally_eq_terms(
+                    database_storage.terms.as_ref(),
+                    db_arg.id,
+                    query_storage.terms.as_ref(),
+                    query_arg,
+                )
+            }))
+            .collect::<SmallVec<[ClauseId; 2]>>();
+        // Buckets group clauses by argument shape, so restore insertion order before proof search.
+        candidates.sort_by_key(|clause| self.positions[clause]);
+        candidates
+    }
+
+    /// Picks the ground query argument that is expected to produce the fewest candidates.
+    ///
+    /// For each ground query argument, this checks the same-position bucket and estimates its
+    /// candidate count as `variable clauses + same-hash ground clauses`. The smallest estimate is
+    /// used by `candidates_for`.
+    fn best_ground_arg_bucket<'a>(
+        &'a self,
+        query_storage: &'a TermStorage<AtomId>,
+        query_term: TermView<'_, AtomId>,
+    ) -> Option<(usize, TermId, &'a ArgBuckets, &'a [ClauseId])> {
+        query_term
+            .args()
+            .enumerate()
+            .filter_map(|(arg_index, arg)| {
+                if arg.contains_variable() {
+                    return None;
+                }
+                let buckets = self.args.get(arg_index)?;
+                let hash = buf_term_hash(query_storage.terms.as_ref(), arg.id);
+                let bucket = buckets
+                    .ground
+                    .get(&hash)
+                    .map_or([].as_slice(), Vec::as_slice);
+                Some((arg_index, arg.id, buckets, bucket))
+            })
+            .min_by_key(|(_, _, buckets, bucket)| buckets.variable.len() + bucket.len())
+    }
+}
+
+#[derive(Debug, Default)]
+struct ArgBuckets {
+    ground: PassThroughMap<Vec<ClauseId>>,
+    variable: Vec<ClauseId>,
+}
+
 /// Tracks clauses already inserted into a database after normalizing variable names.
 ///
 /// Clause variables are local to one clause, so `p($A).` and `p($B).` should count as the same
@@ -492,7 +612,7 @@ fn _convert_var_into_num<T: Atom>(
 /// Iterator over clauses in a [`Database`].
 #[derive(Clone)]
 pub struct ClauseIter<'a, T> {
-    clauses: &'a IndexMap<Predicate<AtomId>, Vec<ClauseId>>,
+    clauses: &'a IndexMap<Predicate<AtomId>, PredicateClauses>,
     database_storage: &'a TermStorage<AtomId>,
     name_interner: &'a NameInterner<T>,
     i: usize,
@@ -506,7 +626,7 @@ impl<'a, T> Iterator for ClauseIter<'a, T> {
         let id = loop {
             let (_, group) = self.clauses.get_index(self.i)?;
 
-            if let Some(id) = group.get(self.j) {
+            if let Some(id) = group.all.get(self.j) {
                 self.j += 1;
                 break *id;
             }
@@ -1392,6 +1512,50 @@ mod tests {
             parse::parse_str("candidate_match(req3, $Candidate).", &interner).unwrap();
         let answer = collect_answer(db.query(query));
         let expected = [["$Candidate = candidate3"]];
+        assert_eq!(answer, expected);
+    }
+
+    #[test]
+    fn test_candidate_filter_preserves_clause_order_between_exact_and_variable_heads() {
+        let mut db = Database::default();
+        let interner = Interner::new();
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            choice(a, exact).
+            choice($X, fallback).
+            ",
+        );
+
+        let query: Expr<'_> = parse::parse_str("choice(a, $Which).", &interner).unwrap();
+        let answer = collect_answer(db.query(query));
+        let expected = [["$Which = exact"], ["$Which = fallback"]];
+        assert_eq!(answer, expected);
+    }
+
+    #[test]
+    fn test_candidate_filter_uses_later_ground_arguments() {
+        let mut db = Database::default();
+        let interner = Interner::new();
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            value(candidate0, target, exact0).
+            value(candidate1, other, noise1).
+            value(candidate2, target, exact2).
+            value($Candidate, target, fallback).
+            ",
+        );
+
+        let query: Expr<'_> =
+            parse::parse_str("value($Candidate, target, $Value).", &interner).unwrap();
+        let answer = collect_answer(db.query(query));
+        let expected = [
+            ["$Candidate = candidate0", "$Value = exact0"],
+            ["$Candidate = candidate2", "$Value = exact2"],
+        ];
         assert_eq!(answer, expected);
     }
 

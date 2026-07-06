@@ -1,5 +1,6 @@
 use super::{
     canonical,
+    db::PredicateClauses,
     repr::{
         ApplyResult, ClauseId, ExprId, ExprKind, ExprView, TermDeepView, TermElem, TermId,
         TermStorage, TermView, TermViewMut, UniqueTermArray,
@@ -95,7 +96,7 @@ impl ProofEngine {
     pub(crate) fn prove<'a, T: Atom>(
         self,
         query: Expr<T>,
-        clauses: &'a IndexMap<Predicate<AtomId>, Vec<ClauseId>>,
+        clauses: &'a IndexMap<Predicate<AtomId>, PredicateClauses>,
         tabled_predicates: &'a IndexSet<Predicate<AtomId>>,
         database_storage: &'a TermStorage<AtomId>,
         database_name_interner: &'a NameInterner<T>,
@@ -118,7 +119,7 @@ impl ProofEngine {
     fn evaluate_node(
         &mut self,
         node_index: usize,
-        clauses: &IndexMap<Predicate<AtomId>, Vec<ClauseId>>,
+        clauses: &IndexMap<Predicate<AtomId>, PredicateClauses>,
         tabled_predicates: &IndexSet<Predicate<AtomId>>,
         database_storage: &TermStorage<AtomId>,
         query_storage: &mut TermStorage<AtomId>,
@@ -187,8 +188,11 @@ impl ProofEngine {
         // === BFS based SLD path ===
 
         if candidate_clauses.is_empty() {
-            if let Some(v) = clauses.get(&node_leftmost_pred) {
-                for &clause in v {
+            if let Some(index) = clauses.get(&node_leftmost_pred) {
+                let node_leftmost = query_storage.get_term(node_leftmost);
+                let db_candidates =
+                    index.candidates_for(database_storage, query_storage, node_leftmost);
+                for clause in db_candidates {
                     let template =
                         if let Some(&template) = self.imported_clause_templates.get(&clause) {
                             template
@@ -889,7 +893,7 @@ struct BoundTerm {
 #[derive(Clone)]
 pub struct QueryCx<'a, T: Atom> {
     proof_engine: ProofEngine,
-    clauses: &'a IndexMap<Predicate<AtomId>, Vec<ClauseId>>,
+    clauses: &'a IndexMap<Predicate<AtomId>, PredicateClauses>,
     tabled_predicates: &'a IndexSet<Predicate<AtomId>>,
     database_storage: &'a TermStorage<AtomId>,
     query_storage: TermStorage<AtomId>,
@@ -900,7 +904,7 @@ impl<'a, T: Atom> QueryCx<'a, T> {
     fn new(
         mut proof_engine: ProofEngine,
         query: Expr<T>,
-        clauses: &'a IndexMap<Predicate<AtomId>, Vec<ClauseId>>,
+        clauses: &'a IndexMap<Predicate<AtomId>, PredicateClauses>,
         tabled_predicates: &'a IndexSet<Predicate<AtomId>>,
         database_storage: &'a TermStorage<AtomId>,
         database_name_interner: &'a NameInterner<T>,

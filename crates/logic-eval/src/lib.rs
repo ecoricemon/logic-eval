@@ -41,7 +41,8 @@ mod intern_alias {
 pub(crate) type Map<K, V> = fxhash::FxHashMap<K, V>;
 pub(crate) type IndexMap<K, V> = indexmap::IndexMap<K, V, fxhash::FxBuildHasher>;
 pub(crate) type IndexSet<T> = indexmap::IndexSet<T, fxhash::FxBuildHasher>;
-pub(crate) type PassThroughIndexMap<K, V> = indexmap::IndexMap<K, V, PassThroughState>;
+pub(crate) type PassThroughMap<V> = std::collections::HashMap<u64, V, PassThroughState>;
+pub(crate) type PassThroughIndexMap<V> = indexmap::IndexMap<u64, V, PassThroughState>;
 
 use std::{
     error::Error as StdError,
@@ -56,7 +57,7 @@ struct PassThroughHasher {
 
 impl Hasher for PassThroughHasher {
     fn write(&mut self, _bytes: &[u8]) {
-        panic!("u64 is only allowed");
+        panic!("only `u64` is allowed");
     }
 
     fn write_u64(&mut self, i: u64) {

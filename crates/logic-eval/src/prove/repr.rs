@@ -767,7 +767,7 @@ pub(crate) struct UniqueTermArray<T> {
     ///
     /// You are encouraged to call two methods below to access this field, [`Self::add_mapping`] and
     /// [`Self::get_similar`], which hide the problem.
-    pub(crate) map: PassThroughIndexMap<u64, Vec<TermId>>,
+    pub(crate) map: PassThroughIndexMap<Vec<TermId>>,
 }
 
 impl<T> UniqueTermArray<T> {
@@ -1591,8 +1591,47 @@ fn structually_eq<T: PartialEq>(buf: &[TermElem<T>], a: TermId, b: TermId) -> bo
     })
 }
 
+/// Returns `true` if the terms from two buffers are structurally identical.
+pub(crate) fn structurally_eq_terms<T: PartialEq>(
+    left_buf: &[TermElem<T>],
+    left: TermId,
+    right_buf: &[TermElem<T>],
+    right: TermId,
+) -> bool {
+    if core::ptr::eq(left_buf, right_buf) && left == right {
+        return true;
+    }
+    let TermElem::Functor(left_functor) = &left_buf[left.0] else {
+        return false;
+    };
+    let TermElem::Functor(right_functor) = &right_buf[right.0] else {
+        return false;
+    };
+    if left_functor != right_functor {
+        return false;
+    }
+    let TermElem::Arity(left_arity) = left_buf[left.0 + 1] else {
+        return false;
+    };
+    let TermElem::Arity(right_arity) = right_buf[right.0 + 1] else {
+        return false;
+    };
+    if left_arity != right_arity {
+        return false;
+    }
+    (0..left_arity as usize).all(|i| {
+        let TermElem::Arg(left_arg) = left_buf[left.0 + 2 + i] else {
+            return false;
+        };
+        let TermElem::Arg(right_arg) = right_buf[right.0 + 2 + i] else {
+            return false;
+        };
+        structurally_eq_terms(left_buf, left_arg, right_buf, right_arg)
+    })
+}
+
 /// Generates the same hash value as what [`term_hash`] generates.
-fn buf_term_hash<T: Hash>(buf: &[TermElem<T>], id: TermId) -> u64 {
+pub(crate) fn buf_term_hash<T: Hash>(buf: &[TermElem<T>], id: TermId) -> u64 {
     // A hasher with fixed keys
     let mut hasher = FxHasher::default();
     write_term(&mut hasher, buf, id);
