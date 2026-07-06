@@ -23,8 +23,20 @@ where
 
 /// A parser for values that may borrow interned strings.
 pub trait Parse<'int, Int: Intern>: Sized + 'int {
+    /// Tries to parse a value without constructing an error on mismatch.
+    ///
+    /// Implementations must leave `buf` unchanged when returning `None`.
+    fn try_parse(_buf: &mut ParseBuffer<'_>, _interner: &'int Int) -> Option<Self>;
+
+    /// Creates the error reported by [`Self::parse`] when parsing fails.
+    fn expected_error(buf: &ParseBuffer<'_>) -> Error {
+        format!("failed to parse from {}", buf.cur_text()).into()
+    }
+
     /// Parses a value from `buf` using `interner`.
-    fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self>;
+    fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self> {
+        Self::try_parse(buf, interner).ok_or_else(|| Self::expected_error(buf))
+    }
 }
 
 /// A cursor over a bounded slice of parser input.
@@ -65,8 +77,7 @@ impl<'a> ParseBuffer<'a> {
         T: Parse<'int, Int>,
     {
         let mut peek = *self;
-        // FIXME: No need to create error messages, which may cause performance issue.
-        T::parse(&mut peek, interner).ok().map(|t| (t, peek))
+        T::try_parse(&mut peek, interner).map(|t| (t, peek))
     }
 }
 
@@ -79,7 +90,7 @@ impl Ident {
 }
 
 impl<Int: Intern> Parse<'_, Int> for Ident {
-    fn parse(buf: &mut ParseBuffer<'_>, _: &'_ Int) -> Result<Self> {
+    fn try_parse(buf: &mut ParseBuffer<'_>, _: &'_ Int) -> Option<Self> {
         fn is_allowed_first(c: char) -> bool {
             c.is_alphabetic() || !(c.is_whitespace() || RESERVED.contains(&c))
         }
@@ -90,9 +101,7 @@ impl<Int: Intern> Parse<'_, Int> for Ident {
 
         let s = buf.cur_text();
 
-        let Some(l) = s.find(|c: char| !c.is_whitespace()) else {
-            return Err("expected an ident, but input is empty".into());
-        };
+        let l = s.find(|c: char| !c.is_whitespace())?;
 
         let mut r = l;
 
@@ -100,7 +109,7 @@ impl<Int: Intern> Parse<'_, Int> for Ident {
         if is_allowed_first(first) {
             r += first.len_utf8();
         } else {
-            return Err(format!("expected an ident from {}", s).into());
+            return None;
         }
 
         for rest in s[l..].chars().skip(1) {
@@ -116,24 +125,29 @@ impl<Int: Intern> Parse<'_, Int> for Ident {
             right: buf.start + r,
         };
         buf.start += r;
-        Ok(Ident(loc))
+        Some(Ident(loc))
+    }
+
+    fn expected_error(buf: &ParseBuffer<'_>) -> Error {
+        let s = buf.cur_text();
+        if s.chars().all(char::is_whitespace) {
+            "expected an ident, but input is empty".into()
+        } else {
+            format!("expected an ident from {s}").into()
+        }
     }
 }
 
 macro_rules! impl_parse_for_string {
     ($str:literal, $ty:ident) => {
         impl<Int: Intern> Parse<'_, Int> for $ty {
-            fn parse(buf: &mut ParseBuffer<'_>, _: &Int) -> Result<Self> {
+            fn try_parse(buf: &mut ParseBuffer<'_>, _: &Int) -> Option<Self> {
                 let s = buf.cur_text();
 
-                let Some(l) = s.find(|c: char| !c.is_whitespace()) else {
-                    return Err(format!("expected `{}` from `{}`", $str, s).into());
-                };
+                let l = s.find(|c: char| !c.is_whitespace())?;
                 let r = l + $str.len();
 
-                let substr = s
-                    .get(l..r)
-                    .ok_or(Error::from(format!("expected `{}` from `{s}`", $str)))?;
+                let substr = s.get(l..r)?;
 
                 if substr == $str {
                     let loc = Location {
@@ -141,10 +155,14 @@ macro_rules! impl_parse_for_string {
                         right: buf.start + r,
                     };
                     buf.start += r;
-                    Ok($ty { _loc: loc })
+                    Some($ty { _loc: loc })
                 } else {
-                    Err(format!("expected `{}` from `{s}`", $str).into())
+                    None
                 }
+            }
+
+            fn expected_error(buf: &ParseBuffer<'_>) -> Error {
+                format!("expected `{}` from `{}`", $str, buf.cur_text()).into()
             }
         }
     };
@@ -213,7 +231,7 @@ pub(crate) struct Location {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::repr::Clause;
+    use crate::{parse::repr::Clause, ClauseIn, TermIn};
 
     type Interner = any_intern::DroplessInterner;
 
@@ -233,5 +251,37 @@ mod tests {
         assert("f(a, b) :- f(a), f(b).", &interner);
         assert("f(a, b) :- f(a); f(b).", &interner);
         assert("f(a, b) :- f(a), (f(b); f(c)).", &interner);
+    }
+
+    #[test]
+    fn clause_requires_trailing_dot() {
+        let interner = Interner::new();
+        let mut buf = ParseBuffer::new("f");
+        let original = buf;
+
+        assert!(ClauseIn::<'_, Interner>::try_parse(&mut buf, &interner).is_none());
+        assert_eq!(buf.start, original.start);
+        assert_eq!(buf.end, original.end);
+    }
+
+    #[test]
+    fn try_parse_failure_preserves_buffer() {
+        fn assert_unchanged<'int, T>(text: &str, interner: &'int Interner)
+        where
+            T: Parse<'int, Interner>,
+        {
+            let mut buf = ParseBuffer::new(text);
+            let original = buf;
+            assert!(T::try_parse(&mut buf, interner).is_none());
+            assert_eq!(buf.start, original.start);
+            assert_eq!(buf.end, original.end);
+        }
+
+        let interner = Interner::new();
+
+        assert_unchanged::<CommaToken>("foo", &interner);
+        assert_unchanged::<Ident>(",", &interner);
+        assert_unchanged::<TermIn<'_, Interner>>("foo(", &interner);
+        assert_unchanged::<ClauseIn<'_, Interner>>("foo(", &interner);
     }
 }

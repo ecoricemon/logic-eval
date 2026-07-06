@@ -3,7 +3,7 @@ use super::{
     CloseParenToken, CommaToken, DotToken, HornToken, Ident, NegationToken, OpenParenToken, Parse,
     ParseBuffer,
 };
-use crate::{ClauseDatasetIn, ClauseIn, Error, ExprIn, Intern, NameIn, Result, TermIn};
+use crate::{ClauseDatasetIn, ClauseIn, ExprIn, Intern, NameIn, Result, TermIn};
 use std::{
     borrow::Borrow,
     fmt::{self, Debug, Display},
@@ -12,57 +12,101 @@ use std::{
 };
 
 impl<'int, Int: Intern> Parse<'int, Int> for ClauseDatasetIn<'int, Int> {
-    fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self> {
-        let mut v = Vec::new();
-        while let Some(moved_buf) = {
-            let mut peek = *buf;
-            ClauseIn::<'int, Int>::parse(&mut peek, interner)
-                .ok()
-                .map(|c| (c, peek))
-        } {
-            let (clause, moved) = moved_buf;
-            v.push(clause);
-            *buf = moved;
+    fn try_parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Option<Self> {
+        fn next_clause_buf<'a>(buf: &ParseBuffer<'a>) -> Option<ParseBuffer<'a>> {
+            let dot = buf.cur_text().find('.')?;
+            Some(ParseBuffer {
+                text: buf.text,
+                start: buf.start,
+                end: buf.start + dot + 1,
+            })
         }
-        Ok(ClauseDataset(v))
+
+        let mut v = Vec::new();
+
+        while let Some(mut clause_buf) = next_clause_buf(buf) {
+            let Some(clause) = ClauseIn::<'int, Int>::try_parse(&mut clause_buf, interner) else {
+                break;
+            };
+            v.push(clause);
+            buf.start = clause_buf.start;
+        }
+
+        Some(ClauseDataset(v))
     }
 }
 
 impl<'int, Int: Intern> Parse<'int, Int> for ClauseIn<'int, Int> {
-    fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self> {
-        let head = TermIn::<'int, Int>::parse(buf, interner)?;
+    fn try_parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Option<Self> {
+        fn parse_inner<'int, Int: Intern>(
+            buf: &mut ParseBuffer<'_>,
+            interner: &'int Int,
+        ) -> Option<ClauseIn<'int, Int>> {
+            let head = TermIn::<'int, Int>::try_parse(buf, interner)?;
 
-        let body = if let Some((_, mut body_buf)) = buf.peek_parse::<Int, HornToken>(interner) {
-            let dot = body_buf
-                .cur_text()
-                .find('.')
-                .ok_or(Error::from("clause must end with `.`"))?;
-            body_buf.end = body_buf.start + dot;
-            let body = ExprIn::<'int, Int>::parse(&mut body_buf, interner)?;
+            let body = if let Some((_, mut body_buf)) = buf.peek_parse::<Int, HornToken>(interner) {
+                let dot = body_buf.cur_text().find('.')?;
+                body_buf.end = body_buf.start + dot;
 
-            buf.start = body_buf.end + 1; // Next to the dot
-            Some(body)
-        } else {
-            let _ = buf.parse::<Int, DotToken>(interner)?;
-            None
-        };
+                let body = ExprIn::<'int, Int>::try_parse(&mut body_buf, interner)?;
 
-        Ok(Clause { head, body })
+                buf.start = body_buf.end + 1; // Next to the dot
+                Some(body)
+            } else {
+                DotToken::try_parse(buf, interner)?;
+                None
+            };
+
+            Some(Clause { head, body })
+        }
+
+        let original = *buf;
+        let parsed = parse_inner(buf, interner);
+        if parsed.is_none() {
+            *buf = original;
+        }
+        parsed
+    }
+
+    fn expected_error(buf: &ParseBuffer<'_>) -> crate::Error {
+        format!("expected a clause from {}", buf.cur_text()).into()
     }
 }
 
 impl<'int, Int: Intern> Parse<'int, Int> for ExprIn<'int, Int> {
     /// Caller is supposed to give the exact buffer for an Expr.
-    fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self> {
-        Expr::<Name<()>>::parse_or(*buf, interner)
+    fn try_parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Option<Self> {
+        let original = *buf;
+        match Expr::<Name<()>>::parse_or(*buf, interner) {
+            Ok(expr) => Some(expr),
+            Err(_) => {
+                *buf = original;
+                None
+            }
+        }
+    }
+
+    fn expected_error(buf: &ParseBuffer<'_>) -> crate::Error {
+        format!("expected an expression from {}", buf.cur_text()).into()
     }
 }
 
 impl<'int, Int: Intern> Parse<'int, Int> for TermIn<'int, Int> {
-    fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self> {
-        let functor = Name::parse(buf, interner)?;
-        let args = Term::parse_args(buf, interner)?;
-        Ok(Term { functor, args })
+    fn try_parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Option<Self> {
+        let original = *buf;
+        let functor = Name::try_parse(buf, interner)?;
+        let args = match Term::parse_args(buf, interner) {
+            Ok(args) => args,
+            Err(_) => {
+                *buf = original;
+                return None;
+            }
+        };
+        Some(Term { functor, args })
+    }
+
+    fn expected_error(buf: &ParseBuffer<'_>) -> crate::Error {
+        format!("expected a term from {}", buf.cur_text()).into()
     }
 }
 
@@ -252,10 +296,10 @@ impl Name<()> {
 }
 
 impl<'int, Int: Intern> Parse<'int, Int> for NameIn<'int, Int> {
-    fn parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Result<Self> {
-        let ident = buf.parse::<Int, Ident>(interner)?;
+    fn try_parse(buf: &mut ParseBuffer<'_>, interner: &'int Int) -> Option<Self> {
+        let ident = Ident::try_parse(buf, interner)?;
         let interned = interner.intern_str(ident.to_text(buf.text));
-        Ok(Self(interned))
+        Some(Self(interned))
     }
 }
 
