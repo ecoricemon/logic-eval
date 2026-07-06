@@ -411,7 +411,7 @@ pub(crate) struct PredicateClauses {
 
 impl PredicateClauses {
     fn insert(&mut self, clause: ClauseId, storage: &TermStorage<AtomId>) {
-        if self.all.contains(&clause) {
+        if self.positions.contains_key(&clause) {
             if cfg!(debug_assertions) {
                 panic!("duplicate clause inserted into PredicateClauses: {clause:?}")
             } else {

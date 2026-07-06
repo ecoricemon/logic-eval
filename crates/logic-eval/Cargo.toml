@@ -24,7 +24,15 @@ name = "query_threads"
 harness = false
 
 [[bench]]
-name = "candidate_filter"
+name = "query"
+harness = false
+
+[[bench]]
+name = "database_build"
+harness = false
+
+[[bench]]
+name = "parse"
 harness = false
 
 [[example]]
