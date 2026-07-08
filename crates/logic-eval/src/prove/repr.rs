@@ -46,6 +46,18 @@ impl<T> TermStorage<T> {
     pub(crate) fn get_term_mut(&mut self, id: TermId) -> TermViewMut<'_, T> {
         self.terms.get_mut(id)
     }
+
+    pub(crate) fn len(&self) -> TermStorageLen {
+        TermStorageLen {
+            expr_len: self.exprs.len(),
+            term_len: self.terms.len(),
+        }
+    }
+
+    pub(crate) fn truncate(&mut self, len: TermStorageLen) {
+        self.exprs.truncate(len.expr_len);
+        self.terms.truncate(len.term_len);
+    }
 }
 
 impl<T: Clone + Eq + Hash> TermStorage<T> {
@@ -282,6 +294,12 @@ impl ops::IndexMut<ExprId> for [ExprElem] {
     fn index_mut(&mut self, index: ExprId) -> &mut Self::Output {
         &mut self[index.0]
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TermStorageLen {
+    expr_len: usize,
+    term_len: TermArrayLen,
 }
 
 #[derive(Clone, Copy)]
@@ -803,6 +821,18 @@ impl<T> UniqueTermArray<T> {
             .resize_with(cur_len + additional, || TermElem::dummy());
         cur_len
     }
+
+    fn len(&self) -> TermArrayLen {
+        TermArrayLen {
+            buf_len: self.buf.len(),
+            map_len: self.map.len(),
+        }
+    }
+
+    fn truncate(&mut self, len: TermArrayLen) {
+        self.buf.truncate(len.buf_len);
+        self.map.truncate(len.map_len);
+    }
 }
 
 impl<T: Clone + Eq + Hash + PartialEq> UniqueTermArray<T> {
@@ -990,6 +1020,12 @@ impl<T> ops::Index<TermId> for [TermElem<T>] {
     fn index(&self, index: TermId) -> &Self::Output {
         &self[index.0]
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TermArrayLen {
+    buf_len: usize,
+    map_len: usize,
 }
 
 struct SimilarTerms<'a, T> {

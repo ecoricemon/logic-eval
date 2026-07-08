@@ -1492,6 +1492,34 @@ impl<T> NameInterner<T> {
     pub(crate) fn get_name(&self, atom_id: &AtomId) -> Option<&T> {
         self.id_to_name.get(atom_id)
     }
+
+    pub(crate) fn len(&self) -> NameInternerLen {
+        NameInternerLen {
+            name_to_id_len: self.name_to_id.len(),
+            id_to_name_len: self.id_to_name.len(),
+            next_id: self.next_id,
+        }
+    }
+
+    pub(crate) fn truncate(
+        &mut self,
+        NameInternerLen {
+            name_to_id_len,
+            id_to_name_len,
+            next_id,
+        }: NameInternerLen,
+    ) {
+        self.name_to_id.truncate(name_to_id_len);
+        self.id_to_name.truncate(id_to_name_len);
+        self.next_id = next_id;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NameInternerLen {
+    name_to_id_len: usize,
+    id_to_name_len: usize,
+    next_id: u32,
 }
 
 impl<T: Atom> NameInterner<T> {
