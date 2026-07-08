@@ -1,9 +1,9 @@
 use super::{
     proof_engine::{
         format::{NamedExprView, NamedTermView},
-        AtomId, NameInterner, ProofEngine, QueryCx,
+        AtomId, NameInterner, NameInternerLen, ProofEngine, QueryCx,
     },
-    repr::{buf_term_hash, structurally_eq_terms, ClauseId, TermId, TermStorage},
+    repr::{buf_term_hash, structurally_eq_terms, ClauseId, TermId, TermStorage, TermStorageLen},
 };
 use crate::{
     parse::{
@@ -152,6 +152,35 @@ impl<T: Atom> Database<T> {
             .insert(value, &self.database_storage);
     }
 
+    /// Saves the current database insertion state.
+    pub fn checkpoint(&self) -> DatabaseCheckpoint {
+        DatabaseCheckpoint {
+            clauses_len: self.clauses.len(),
+            predicate_clause_lens: self.clauses.values().map(PredicateClauses::len).collect(),
+            tabled_predicates_len: self.tabled_predicates.len(),
+            storage_len: self.database_storage.len(),
+            names: self.name_interner.len(),
+            dup_checker_len: self.dup_checker.len(),
+        }
+    }
+
+    /// Restores the database insertion state saved by `checkpoint`.
+    pub fn revert(&mut self, checkpoint: DatabaseCheckpoint) {
+        self.clauses.truncate(checkpoint.clauses_len);
+        for (clauses, len) in self
+            .clauses
+            .values_mut()
+            .zip(checkpoint.predicate_clause_lens)
+        {
+            clauses.truncate(len, &self.database_storage);
+        }
+        self.tabled_predicates
+            .truncate(checkpoint.tabled_predicates_len);
+        self.database_storage.truncate(checkpoint.storage_len);
+        self.name_interner.truncate(checkpoint.names);
+        self.dup_checker.truncate(checkpoint.dup_checker_len);
+    }
+
     /// Starts a query against the database.
     ///
     /// # Examples
@@ -213,7 +242,7 @@ impl<T: Atom> Database<T> {
         };
 
         for clauses in self.clauses.values() {
-            for clause in &clauses.all {
+            for clause in clauses.clauses.iter().copied() {
                 let head = self.database_storage.get_term(clause.head);
                 write_term(head, &mut conv_map, &mut prolog_text);
 
@@ -396,6 +425,17 @@ impl<T: Debug> Debug for Database<T> {
     }
 }
 
+/// A saved database insertion state that can be restored with [`Database::revert`].
+#[derive(Debug, Clone)]
+pub struct DatabaseCheckpoint {
+    clauses_len: usize,
+    predicate_clause_lens: Vec<usize>,
+    tabled_predicates_len: usize,
+    storage_len: TermStorageLen,
+    names: NameInternerLen,
+    dup_checker_len: usize,
+}
+
 /// Clauses for one predicate, grouped with small lookup buckets for query optimization.
 ///
 /// The buckets let proof search skip clauses that are obviously incompatible with a ground query
@@ -404,14 +444,31 @@ impl<T: Debug> Debug for Database<T> {
 /// insertion order.
 #[derive(Debug, Default)]
 pub(crate) struct PredicateClauses {
-    all: Vec<ClauseId>,
-    positions: Map<ClauseId, usize>,
+    clauses: IndexSet<ClauseId>,
     args: Vec<ArgBuckets>,
 }
 
 impl PredicateClauses {
+    fn len(&self) -> usize {
+        self.clauses.len()
+    }
+
+    fn truncate(&mut self, len: usize, storage: &TermStorage<AtomId>) {
+        self.clauses.truncate(len);
+        self.rebuild_args(storage);
+    }
+
+    fn rebuild_args(&mut self, storage: &TermStorage<AtomId>) {
+        let clauses = self.clauses.iter().copied().collect::<Vec<_>>();
+        self.args.clear();
+
+        for clause in clauses {
+            self.insert_arg_buckets(clause, storage);
+        }
+    }
+
     fn insert(&mut self, clause: ClauseId, storage: &TermStorage<AtomId>) {
-        if self.positions.contains_key(&clause) {
+        if !self.clauses.insert(clause) {
             if cfg!(debug_assertions) {
                 panic!("duplicate clause inserted into PredicateClauses: {clause:?}")
             } else {
@@ -419,10 +476,10 @@ impl PredicateClauses {
             }
         }
 
-        let position = self.all.len();
-        self.all.push(clause);
-        self.positions.insert(clause, position);
+        self.insert_arg_buckets(clause, storage);
+    }
 
+    fn insert_arg_buckets(&mut self, clause: ClauseId, storage: &TermStorage<AtomId>) {
         let head = storage.get_term(clause.head);
         for (arg_index, arg) in head.args().enumerate() {
             while self.args.len() <= arg_index {
@@ -459,7 +516,7 @@ impl PredicateClauses {
         let Some((arg_index, query_arg, buckets, ground)) =
             self.best_ground_arg_bucket(query_storage, query_term)
         else {
-            return self.all.iter().copied().collect();
+            return self.clauses.iter().copied().collect();
         };
 
         let mut candidates = buckets
@@ -480,7 +537,7 @@ impl PredicateClauses {
             }))
             .collect::<SmallVec<[ClauseId; 2]>>();
         // Buckets group clauses by argument shape, so restore insertion order before proof search.
-        candidates.sort_by_key(|clause| self.positions[clause]);
+        candidates.sort_by_key(|clause| self.clauses.get_index_of(clause).unwrap());
         candidates
     }
 
@@ -534,6 +591,14 @@ struct DuplicateClauseChecker {
 }
 
 impl DuplicateClauseChecker {
+    fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    fn truncate(&mut self, len: usize) {
+        self.seen.truncate(len);
+    }
+
     /// Returns `true` if the given clause is new and has not been seen before.
     fn insert(&mut self, clause: Clause<AtomId>) -> bool {
         let canonical_clause = clause.map(&mut |t| {
@@ -626,7 +691,7 @@ impl<'a, T> Iterator for ClauseIter<'a, T> {
         let id = loop {
             let (_, group) = self.clauses.get_index(self.i)?;
 
-            if let Some(id) = group.all.get(self.j) {
+            if let Some(id) = group.clauses.get_index(self.j) {
                 self.j += 1;
                 break *id;
             }
@@ -1202,6 +1267,48 @@ mod tests {
         answer.sort_unstable();
         expected.sort_unstable();
         assert_eq!(answer, expected);
+    }
+
+    #[test]
+    fn test_checkpoint_revert_restores_database_insert_state() {
+        let mut db = Database::default();
+        let interner = Interner::new();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            f(a).
+            ",
+        );
+        let checkpoint = db.checkpoint();
+        let clause_count = db.clauses().count();
+        let tabled_predicate_count = db.tabled_predicates.len();
+
+        insert_dataset(
+            &mut db,
+            &interner,
+            r"
+            f(b).
+            loop($X) :- loop($X).
+            ",
+        );
+
+        db.revert(checkpoint);
+
+        assert_eq!(db.clauses().count(), clause_count);
+        assert_eq!(db.tabled_predicates.len(), tabled_predicate_count);
+
+        let query: Expr<'_> = parse::parse_str("f($X).", &interner).unwrap();
+        let answer = collect_answer(db.query(query));
+        assert_eq!(answer, [["$X = a"]]);
+
+        let clause: Clause<'_> = parse::parse_str("f(b).", &interner).unwrap();
+        db.insert_clause(clause);
+
+        let query: Expr<'_> = parse::parse_str("f($X).", &interner).unwrap();
+        let answer = collect_answer(db.query(query));
+        assert_eq!(answer, [["$X = a"], ["$X = b"]]);
     }
 
     #[test]

@@ -14,7 +14,7 @@ pub use parse::{
 };
 pub use prove::{
     common::Atom,
-    db::{ClauseIter, ClauseRef, Database},
+    db::{ClauseIter, ClauseRef, Database, DatabaseCheckpoint},
     proof_engine::{Answer, AnswerCardinalityError, QueryCx},
 };
 
