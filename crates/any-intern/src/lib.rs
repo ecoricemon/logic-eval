@@ -408,7 +408,7 @@ mod tests {
         common::assert_group_addr_eq(&groups);
     }
 
-    // Address insdie Interned<'_, T> must be valid while the interner lives.
+    // Address inside Interned<'_, T> must be valid while the interner lives.
     #[test]
     fn test_fixed_memory_after_huge_number_of_interninig() {
         const TEST_SIZE_IN_BYTES: isize = if cfg!(miri) {

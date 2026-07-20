@@ -183,7 +183,7 @@ pub(crate) const RESERVED: &[char] = &[
     ')',  // Grouping terms
     '[',  // List
     ']',  // List
-    '|',  // Seperating head and tail in a list
+    '|',  // Separating head and tail in a list
     '+',  // Arithmetic operator
     '-',  // Arithmetic operator
     '*',  // Arithmetic operator

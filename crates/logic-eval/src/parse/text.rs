@@ -226,7 +226,7 @@ impl Term<Name<()>> {
         }
 
         let mut args = Vec::new();
-        let mut well_seperated = true;
+        let mut well_separated = true;
         loop {
             if let Some((_, moved_buf)) = buf.peek_parse::<Int, CloseParenToken>(interner) {
                 *buf = moved_buf;
@@ -234,7 +234,7 @@ impl Term<Name<()>> {
                 break;
             }
 
-            if !well_seperated {
+            if !well_separated {
                 return Err(format!("expected `,` from {}", buf.cur_text()).into());
             }
 
@@ -242,7 +242,7 @@ impl Term<Name<()>> {
             args.push(arg);
 
             let comma = buf.parse::<Int, CommaToken>(interner);
-            well_seperated = comma.is_ok();
+            well_separated = comma.is_ok();
         }
 
         for _ in 0..open {

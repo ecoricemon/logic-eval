@@ -781,7 +781,7 @@ pub(crate) struct UniqueTermArray<T> {
     /// This helps you find similar terms to keep the uniqueness. But for efficiency, the value,
     /// [`Vec<TermId>`], could contain stale data. For example, [`Self::buf`] could be shrunk by
     /// truncate method, but values of this map still would point to removed area of the buffer
-    /// becuase values themselves are not shrunk.
+    /// because values themselves are not shrunk.
     ///
     /// You are encouraged to call two methods below to access this field, [`Self::add_mapping`] and
     /// [`Self::get_similar`], which hide the problem.
@@ -864,7 +864,7 @@ impl<T: Clone + Eq + Hash + PartialEq> UniqueTermArray<T> {
         let hash = buf_term_hash(&self.buf, new_id);
         let dup = 'search: {
             for existing_id in Self::get_similar(self.map.get_mut(&hash), &self.buf, hash) {
-                if existing_id != new_id && structually_eq(&self.buf, existing_id, new_id) {
+                if existing_id != new_id && structurally_eq(&self.buf, existing_id, new_id) {
                     break 'search Some(existing_id);
                 }
             }
@@ -1594,7 +1594,7 @@ fn term_hash<T: Hash>(term: &Term<T>) -> u64 {
 }
 
 /// Returns `true` if the two terms at `a` and `b` are structurally identical.
-fn structually_eq<T: PartialEq>(buf: &[TermElem<T>], a: TermId, b: TermId) -> bool {
+fn structurally_eq<T: PartialEq>(buf: &[TermElem<T>], a: TermId, b: TermId) -> bool {
     if a == b {
         return true;
     }
@@ -1623,7 +1623,7 @@ fn structually_eq<T: PartialEq>(buf: &[TermElem<T>], a: TermId, b: TermId) -> bo
         let TermElem::Arg(arg_b) = buf[b.0 + 2 + i] else {
             return false;
         };
-        structually_eq(buf, arg_a, arg_b)
+        structurally_eq(buf, arg_a, arg_b)
     })
 }
 
